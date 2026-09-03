@@ -886,8 +886,11 @@ summary:focus-visible {
 
 .intro-dialog > p { max-width: 560px; margin: 0; color: #60696d; font-size: 12px; line-height: 1.65; }
 .intro-dialog em { color: #287c85; font-style: normal; }
+.intro-dialog > .paper-reference { margin-top: 9px; color: #788185; font-family: "SFMono-Regular", Consolas, monospace; font-size: 8px; }
+.paper-reference a { color: #287c85; text-decoration-color: rgba(40, 124, 133, 0.4); text-underline-offset: 2px; }
+.paper-reference a:hover { color: #1f666d; text-decoration-color: currentColor; }
 
-.intro-grid {
+  .intro-grid {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
   gap: 1px;

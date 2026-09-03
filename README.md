@@ -1,6 +1,6 @@
 # Spatial Reasoner Workbench
 
-Spatial Reasoner Workbench is an interactive research apparatus for the Python [SRpy](../SRpy) framework. It operationalizes the method presented in *Spatial Reasoner: A 3D Inference Pipeline for XR Applications* (Hasler & Ackermann, ICVARS 2025): measured oriented bounding boxes enter an explicit inference pipeline and leave as auditable spatial predicates and filtered object sets.
+Spatial Reasoner Workbench is an interactive research apparatus for the Python [SRpy](../SRpy) framework. It operationalizes the method presented in *Spatial Reasoner: A 3D Inference Pipeline for XR Applications* by Häsler and Ackermann ([doi:10.1109/ICVARS66454.2025.11198690](https://doi.org/10.1109/ICVARS66454.2025.11198690)): measured oriented bounding boxes enter an explicit inference pipeline and leave as auditable spatial predicates and filtered object sets.
 
 This is **oriented-bounding-box symbolic inference with configurable spatial fuzziness**. It is not a physics simulation, occlusion solver, motion planner, or guarantee of collision-safe paths.
 
