@@ -7,29 +7,17 @@ COPY index.html tsconfig.json tsconfig.app.json tsconfig.node.json vite.config.t
 COPY src ./src
 RUN npm run build
 
-FROM alpine:3.22 AS srpy-source
-ARG SRPY_REPOSITORY=https://github.com/metason/SRpy.git
-ARG SRPY_REF=1617a2393c56f2a0d471c669f06e70f002e57a26
-RUN apk add --no-cache git
-COPY deploy/srpy-runtime.patch /tmp/srpy-runtime.patch
-RUN git clone --filter=blob:none "${SRPY_REPOSITORY}" /source/SRpy \
-    && git -C /source/SRpy checkout "${SRPY_REF}" \
-    && git -C /source/SRpy apply /tmp/srpy-runtime.patch \
-    && rm -rf /source/SRpy/.git
-
 FROM python:3.12-slim AS runtime
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    SRPY_ROOT=/app/SRpy \
     FRONTEND_DIST=/app/frontend
 
 WORKDIR /app
 COPY backend/requirements.runtime.txt /tmp/requirements.txt
 RUN pip install --no-cache-dir -r /tmp/requirements.txt
 
-COPY --from=srpy-source /source/SRpy /app/SRpy
 COPY backend/app /app/backend/app
 COPY --from=frontend /build/dist /app/frontend
 

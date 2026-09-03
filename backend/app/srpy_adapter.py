@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-import os
-import sys
 import time
-from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence
+
+from spatial_reasoner import NearbySchema, SectorSchema, SpatialObject, SpatialReasoner
 
 from .models import (
     ReasonRequest,
@@ -15,16 +14,6 @@ from .models import (
     TraceOutput,
 )
 from .security import validate_pipeline
-
-
-REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
-SRPY_ROOT = Path(os.environ.get("SRPY_ROOT", REPOSITORY_ROOT / "SRpy")).resolve()
-if str(SRPY_ROOT) not in sys.path:
-    sys.path.insert(0, str(SRPY_ROOT))
-
-from src.SpatialBasics import NearbySchema, SectorSchema  # noqa: E402
-from src.SpatialObject import SpatialObject  # noqa: E402
-from src.SpatialReasoner import SpatialReasoner  # noqa: E402
 
 
 def _build_reasoner(objects: Sequence[Any], settings: Any) -> SpatialReasoner:

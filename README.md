@@ -19,15 +19,18 @@ This is **oriented-bounding-box symbolic inference with configurable spatial fuz
 
 ## Run locally
 
-The backend imports the repository's local `../SRpy` source directly; it does not install or copy the framework.
+The backend imports the published `spatial-reasoner` package. For pre-release development,
+install the sibling SRPy checkout in editable mode first; its version satisfies the pinned
+runtime requirement without changing application imports.
 
 ### Backend
 
 From `SpatialReasonerThreeJsDemo`:
 
 ```bash
-python3 -m venv .venv
+python3.12 -m venv .venv
 source .venv/bin/activate
+python -m pip install -e ../SRpy
 pip install -r backend/requirements.txt
 cd backend
 uvicorn app.main:app --reload
@@ -66,7 +69,7 @@ Three.js scene + DOM UI
   └─ stable object IDs, dimensions, base-center positions, yaw radians
        └─ POST /api/reason (debounced and abortable)
             └─ validated pipeline + Pydantic scene schema
-                 └─ local SRpy SpatialObject / SpatialReasoner
+                 └─ spatial_reasoner SpatialObject / SpatialReasoner
                       └─ result IDs, serialized objects, relations, trace, timing
                            └─ visual overlays + inspector proof
 ```
@@ -88,7 +91,9 @@ The backend also returns `nearbyRadius` for every object. This value is evaluate
 
 The production image contains the built Vite client and FastAPI API in one non-root container. FastAPI serves the frontend at `/`, the API at `/api`, and the health probe at `/api/health`, so Dokploy only routes one service and one subdomain.
 
-SRpy is cloned during the source stage at pinned commit `1617a2393c56f2a0d471c669f06e70f002e57a26`. The small patch in `deploy/srpy-runtime.patch` applies the same case-sensitive import and compact predicate-name fixes used by the local sibling checkout. No reasoning code is reimplemented in JavaScript.
+The image installs `spatial-reasoner==0.1.0` from PyPI through the backend's runtime
+requirements. It does not clone or patch the SRPy repository, and no reasoning code is
+reimplemented in JavaScript.
 
 Build and run the production image locally:
 
@@ -161,11 +166,11 @@ deduce(topology connectivity) | filter(supertype == 'Building Element') | select
 
 ## Tests and production build
 
-From `SpatialReasonerThreeJsDemo` with the virtual environment activated:
+From `SpatialReasonerThreeJsDemo` with the Python 3.12 virtual environment activated:
 
 ```bash
 cd ../SRpy
-../SpatialReasonerThreeJsDemo/.venv/bin/python -m pytest tests/SpatialReasoning_test.py tests/SpatialObject_test.py tests/SpatialRelation_test.py
+../SpatialReasonerThreeJsDemo/.venv/bin/python -m pytest -m "not export and not distribution"
 
 cd ../SpatialReasonerThreeJsDemo/backend
 ../.venv/bin/python -m pytest
