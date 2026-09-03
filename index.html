@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      name="description"
+      content="An interactive Three.js research demo for explainable, bounding-box-based SRpy spatial reasoning."
+    />
+    <meta name="theme-color" content="#f4f1ea" />
+    <title>Spatial Grounding Workbench</title>
+  </head>
+  <body>
+    <div id="app">
+      <header class="topbar">
+        <div class="brand-block">
+          <div class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></div>
+          <div>
+            <div class="eyebrow">ICVARS 2025 · SRpy research instrument</div>
+            <h1>Spatial Reasoner Workbench</h1>
+          </div>
+        </div>
+        <div class="topbar-actions">
+          <div id="backendStatus" class="status-pill checking" role="status">
+            <span class="status-dot"></span><span>Checking engine</span>
+          </div>
+          <button id="resetButton" class="quiet-button" type="button" title="Reset the scene">↺ <span>Reset</span></button>
+          <button id="helpButton" class="icon-button" type="button" aria-label="Open help">?</button>
+        </div>
+      </header>
+
+      <main class="workspace">
+        <section class="viewport-panel" aria-label="Interactive 3D workspace">
+          <div id="sceneMount" class="scene-mount"></div>
+          <div class="viewport-head">
+            <div>
+              <div class="viewport-kicker">SCENE 01 · OBJECT-CENTRIC REFERENCE SYSTEM</div>
+              <h2>Tabletop grounding study</h2>
+            </div>
+            <div id="reasoningBadge" class="reasoning-badge"><span></span> Ready</div>
+          </div>
+          <div class="scene-toolbar" aria-label="Object controls">
+            <button id="rotateLeftButton" type="button" title="Rotate selected object left (Q)">↶ <span>15°</span></button>
+            <button id="rotateRightButton" type="button" title="Rotate selected object right (E)">↷ <span>15°</span></button>
+            <span class="toolbar-divider"></span>
+            <span class="toolbar-hint">Drag to move · Q/E to rotate · Shift + drag to pan</span>
+          </div>
+          <details id="modelControls" class="model-controls" open>
+            <summary>Inference parameters <span>CALIBRATE</span></summary>
+            <div class="model-controls-body">
+              <label>
+                <span><b>Near-radius model</b><small>SRpy schema</small></span>
+                <select id="nearbySchema">
+                  <option value="circle">Bounding circle</option>
+                  <option value="sphere">Bounding sphere</option>
+                  <option value="fixed">Fixed radius</option>
+                  <option value="perimeter">Box perimeter</option>
+                  <option value="area">Box area</option>
+                </select>
+              </label>
+              <label class="parameter-slider">
+                <span><b>Radius scale</b><output id="nearbyFactorOutput">1.25×</output></span>
+                <input id="nearbyFactor" type="range" min="0.1" max="5" step="0.05" value="1.25" />
+              </label>
+              <label class="parameter-slider">
+                <span><b>Absolute cap</b><output id="nearbyLimitOutput">2.50 m</output></span>
+                <input id="nearbyLimit" type="range" min="0.1" max="5" step="0.05" value="2.5" />
+              </label>
+              <label class="parameter-check"><input id="showBounds" type="checkbox" /> Show all measured boxes</label>
+              <label class="parameter-check"><input id="showNearField" type="checkbox" checked /> Show selected near radius</label>
+            </div>
+          </details>
+          <div id="resultCard" class="result-card" aria-live="polite"></div>
+          <div class="legend" aria-label="Relation color legend">
+            <span><i class="legend-dot cyan"></i> Result</span>
+            <span><i class="legend-line blue"></i> Direction</span>
+            <span><i class="legend-ring green"></i> Near</span>
+            <span><i class="legend-box amber"></i> Contact / containment</span>
+          </div>
+          <div id="sceneToast" class="scene-toast" role="status"></div>
+        </section>
+
+        <aside id="inspector" class="inspector" aria-label="Object inspector"></aside>
+      </main>
+
+      <section class="query-dock" aria-label="Spatial query composer">
+        <div class="dock-heading">
+          <div>
+            <div class="eyebrow">Inference program</div>
+            <h2>SpatialReasoner pipeline</h2>
+          </div>
+          <span class="local-only">SANDBOXED · SERVER-EVALUATED</span>
+        </div>
+        <div id="presetTray" class="preset-tray" role="list"></div>
+        <div class="composer-row">
+          <label class="pipeline-field">
+            <span>SpatialReasoner pipeline</span>
+            <input id="pipelineInput" spellcheck="false" autocomplete="off" />
+          </label>
+          <button id="runButton" class="run-button" type="button"><span class="run-icon">▶</span> Run reasoning</button>
+        </div>
+        <details id="tracePanel" class="trace-panel">
+          <summary><span>Reasoning trace</span><span id="traceSummary">No execution yet</span></summary>
+          <div id="traceBody" class="trace-body"></div>
+        </details>
+      </section>
+    </div>
+
+    <dialog id="introDialog" class="intro-dialog">
+      <button id="closeIntroButton" class="dialog-close" type="button" aria-label="Close introduction">×</button>
+      <div class="dialog-index">HASLER &amp; ACKERMANN · ICVARS 2025</div>
+      <h2>An inspectable 3D inference<br />pipeline for XR applications.</h2>
+      <p>
+        The apparatus derives searchable spatial attributes and predicate relations from measured oriented
+        bounding boxes. Every query is an explicit SRpy pipeline; every result remains traceable to object IDs,
+        geometry, and server-side predicate evaluation.
+      </p>
+      <div class="intro-grid">
+        <div><span>1</span><strong>Measure</strong><small>Inspect and calibrate the oriented bounding-box vector.</small></div>
+        <div><span>2</span><strong>Deduce</strong><small>Evaluate explicit predicate categories and filters in SRpy.</small></div>
+        <div><span>3</span><strong>Audit</strong><small>Trace each stage from input IDs to the retained result set.</small></div>
+      </div>
+      <div class="scope-note">
+        <strong>Method boundary</strong>
+        Oriented-bounding-box inference with configurable spatial fuzziness; no physics, occlusion solver, or motion-planning safety claim.
+      </div>
+      <button id="startButton" class="run-button" type="button">Enter the workbench <span>→</span></button>
+    </dialog>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

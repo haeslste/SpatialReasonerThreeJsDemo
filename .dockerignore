@@ -1,0 +1,9 @@
+.git
+.DS_Store
+.venv
+backend/.venv
+backend/.pytest_cache
+dist
+node_modules
+coverage
+*.log

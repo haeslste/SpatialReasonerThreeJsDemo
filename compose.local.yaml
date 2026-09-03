@@ -1,0 +1,4 @@
+services:
+  spatial-reasoner:
+    ports:
+      - "127.0.0.1:${SPATIAL_REASONER_PORT:-8000}:8000"
