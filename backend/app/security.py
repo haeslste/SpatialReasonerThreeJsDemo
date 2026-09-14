@@ -1,25 +1,22 @@
+"""A deliberately small, canonical pipeline language for the public workbench.
+
+SRpy 0.1.0 evaluates expressions internally. Only expressions reconstructed from
+this typed grammar are ever passed to that package; visitors' raw text is not.
+"""
+
 from __future__ import annotations
 
 import ast
+import math
 import re
-from typing import Iterable, List, Tuple
+from typing import List
 
 
 class PipelineValidationError(ValueError):
     pass
 
 
-ALLOWED_OPERATIONS = {
-    "deduce",
-    "filter",
-    "pick",
-    "select",
-    "sort",
-    "slice",
-    "calc",
-    "map",
-}
-
+ALLOWED_OPERATIONS = {"deduce", "filter", "pick", "select", "sort", "slice", "calc", "map"}
 ALLOWED_ATTRIBUTES = {
     "id", "label", "type", "supertype", "existence", "cause", "shape", "look",
     "position", "width", "height", "depth", "length", "direction", "thin", "long",
@@ -28,7 +25,11 @@ ALLOWED_ATTRIBUTES = {
     "azimuth", "lifespan", "confidence", "immobile", "velocity", "motion", "visible",
     "focused", "volumeLitres", "workbenchScore",
 }
-
+NUMERIC_ATTRIBUTES = {
+    "width", "height", "depth", "length", "perimeter", "footprint", "frontface",
+    "sideface", "surface", "baseradius", "volume", "radius", "angle", "yaw",
+    "azimuth", "lifespan", "volumeLitres", "workbenchScore",
+}
 ALLOWED_PREDICATES = {
     "near", "far", "left", "right", "above", "below", "ahead", "behind", "on",
     "beneath", "upperside", "lowerside", "leftside", "rightside", "frontside", "backside",
@@ -39,114 +40,205 @@ ALLOWED_PREDICATES = {
     "by", "at", "in", "eightoclock", "nineoclock", "tenoclock", "elevenoclock",
     "twelveoclock", "oneoclock", "twooclock", "threeoclock", "fouroclock",
 }
-
-SAFE_NODE_TYPES = (
-    ast.Expression, ast.BoolOp, ast.BinOp, ast.UnaryOp, ast.Compare, ast.Name, ast.Load,
-    ast.Constant, ast.And, ast.Or, ast.Not, ast.Add, ast.Sub, ast.Mult, ast.Div, ast.Mod,
-    ast.Pow, ast.USub, ast.UAdd, ast.Eq, ast.NotEq, ast.Lt, ast.LtE, ast.Gt, ast.GtE,
-)
-
-
-def _parse_operation(operation: str) -> Tuple[str, str]:
-    match = re.fullmatch(r"([a-z]+)\((.*)\)", operation.strip())
-    if not match:
-        raise PipelineValidationError(f"Invalid operation syntax: {operation!r}")
-    name, content = match.groups()
-    if name not in ALLOWED_OPERATIONS:
-        raise PipelineValidationError(f"Operation {name!r} is not enabled in this demo")
-    return name, content.strip()
+DEDUCTION_CATEGORIES = {
+    "topology", "connectivity", "comparability", "similarity", "visibility",
+    "sectoriality", "geography",
+}
+_SAFE_TEXT = re.compile(r"[A-Za-z0-9 _:-]{0,160}\Z")
+_ASSIGNMENT_KEY = re.compile(r"[A-Za-z][A-Za-z0-9]{0,31}\Z")
+_BOOL_WORDS = re.compile(r"\b(AND|OR|NOT)\b", re.IGNORECASE)
+_MATH_OPS = (ast.Add, ast.Sub, ast.Mult, ast.Div)
+_COMPARE_OPS = (ast.Eq, ast.NotEq, ast.Lt, ast.LtE, ast.Gt, ast.GtE)
 
 
-def _validate_ast(expression: str, allowed_names: Iterable[str]) -> None:
-    normalized = re.sub(r"\bAND\b", "and", expression, flags=re.IGNORECASE)
-    normalized = re.sub(r"\bOR\b", "or", normalized, flags=re.IGNORECASE)
-    normalized = re.sub(r"\bNOT\b", "not", normalized, flags=re.IGNORECASE)
+def _invalid(message: str = "Pipeline expression is outside the public grammar") -> None:
+    raise PipelineValidationError(message)
+
+
+def _normalize_booleans(source: str) -> str:
+    # The accepted string literals cannot contain quote or backslash escapes.
+    parts = re.split(r"('[^']*'|\"[^\"]*\")", source)
+    return "".join(part if index % 2 else _BOOL_WORDS.sub(lambda m: m.group(1).lower(), part)
+                   for index, part in enumerate(parts))
+
+
+def _tree(source: str) -> ast.expr:
     try:
-        tree = ast.parse(normalized, mode="eval")
-    except SyntaxError as exc:
-        raise PipelineValidationError(f"Invalid expression: {expression}") from exc
-    for node in ast.walk(tree):
-        if not isinstance(node, SAFE_NODE_TYPES):
-            raise PipelineValidationError(f"Unsupported expression feature: {type(node).__name__}")
-        if isinstance(node, ast.Name) and node.id not in allowed_names and node.id not in {"True", "False", "None"}:
-            raise PipelineValidationError(f"Unknown expression name: {node.id}")
+        root = ast.parse(_normalize_booleans(source), mode="eval")
+    except (SyntaxError, ValueError, RecursionError) as exc:
+        raise PipelineValidationError("Invalid pipeline expression") from exc
+    nodes = list(ast.walk(root))
+    if len(nodes) > 24:
+        _invalid("Pipeline expression is too complex")
+
+    def depth(node: ast.AST) -> int:
+        return 1 + max((depth(child) for child in ast.iter_child_nodes(node)), default=0)
+
+    if depth(root) > 9:
+        _invalid("Pipeline expression is too deep")
+    return root.body
 
 
-def _validate_relation_expression(expression: str) -> None:
-    words = re.findall(r"[A-Za-z]+", expression)
-    for word in words:
-        lowered = word.lower()
-        if lowered not in ALLOWED_PREDICATES and lowered not in {"and", "or", "not"}:
-            raise PipelineValidationError(f"Unknown relation predicate: {word}")
-    _validate_ast(expression, ALLOWED_PREDICATES)
+def _literal(node: ast.expr, *, string_limit: int = 80) -> str:
+    if not isinstance(node, ast.Constant):
+        _invalid()
+    value = node.value
+    if isinstance(value, str):
+        if len(value) > string_limit or not _SAFE_TEXT.fullmatch(value):
+            _invalid("String literal is outside the public grammar")
+    elif isinstance(value, bool):
+        pass
+    elif isinstance(value, (int, float)):
+        if abs(value) > 1000 or not math.isfinite(value):
+            _invalid("Numeric literal exceeds the public limit")
+    else:
+        _invalid()
+    return repr(value)
 
 
-def _validate_assignments(content: str, operation: str) -> None:
-    for assignment in content.split(";"):
-        if not assignment.strip() or "=" not in assignment:
-            raise PipelineValidationError(f"{operation} requires key = expression assignments")
-        key, expression = [part.strip() for part in assignment.split("=", 1)]
-        if not re.fullmatch(r"[A-Za-z][A-Za-z0-9]{0,31}", key):
-            raise PipelineValidationError(f"Unsafe assignment key: {key}")
-        if operation == "map":
-            if key not in {"label", "type", "supertype", "look", "volumeLitres", "workbenchScore"}:
-                raise PipelineValidationError(f"Map assignment key is not editable: {key}")
-            _validate_ast(expression, ALLOWED_ATTRIBUTES)
+def _numeric(node: ast.expr, *, allow_average: bool = False, operation_count: List[int] | None = None) -> str:
+    counter = operation_count if operation_count is not None else [0]
+    if isinstance(node, ast.Constant):
+        if isinstance(node.value, bool) or not isinstance(node.value, (int, float)):
+            _invalid("Only numeric values are allowed here")
+        return _literal(node)
+    if isinstance(node, ast.Name) and node.id in NUMERIC_ATTRIBUTES and not allow_average:
+        return node.id
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
+        counter[0] += 1
+        if counter[0] > 4:
+            _invalid("Arithmetic expression is too complex")
+        sign = "+" if isinstance(node.op, ast.UAdd) else "-"
+        return f"({sign}{_numeric(node.operand, allow_average=allow_average, operation_count=counter)})"
+    if isinstance(node, ast.BinOp) and isinstance(node.op, _MATH_OPS):
+        counter[0] += 1
+        if counter[0] > 4:
+            _invalid("Arithmetic expression is too complex")
+        left = _numeric(node.left, allow_average=allow_average, operation_count=counter)
+        right = _numeric(node.right, allow_average=allow_average, operation_count=counter)
+        op = {ast.Add: "+", ast.Sub: "-", ast.Mult: "*", ast.Div: "/"}[type(node.op)]
+        return f"({left} {op} {right})"
+    if allow_average and isinstance(node, ast.Call):
+        if (not isinstance(node.func, ast.Name) or node.func.id != "average" or
+                len(node.args) != 1 or node.keywords or
+                not isinstance(node.args[0], ast.Attribute) or
+                not isinstance(node.args[0].value, ast.Name) or
+                node.args[0].value.id != "objects" or node.args[0].attr not in NUMERIC_ATTRIBUTES):
+            _invalid("Only average(objects.numericField) is allowed")
+        return f"average(objects.{node.args[0].attr})"
+    _invalid()
+
+
+def _filter(node: ast.expr) -> str:
+    if isinstance(node, ast.BoolOp) and isinstance(node.op, (ast.And, ast.Or)):
+        op = "and" if isinstance(node.op, ast.And) else "or"
+        return "(" + f" {op} ".join(_filter(value) for value in node.values) + ")"
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
+        return f"(not {_filter(node.operand)})"
+    if isinstance(node, ast.Name) and node.id in {"immobile", "visible", "focused"}:
+        return node.id
+    if isinstance(node, ast.Compare) and len(node.ops) == 1 and isinstance(node.ops[0], _COMPARE_OPS):
+        left = node.left
+        right = node.comparators[0]
+        if isinstance(left, ast.Name) and left.id in ALLOWED_ATTRIBUTES:
+            left_text = left.id
         else:
-            # calc supports SRpy's documented objects.height and average(objects.height)
-            try:
-                tree = ast.parse(expression, mode="eval")
-            except SyntaxError as exc:
-                raise PipelineValidationError(f"Invalid calc expression: {expression}") from exc
-            allowed = SAFE_NODE_TYPES + (ast.Attribute, ast.Call, ast.Subscript)
-            for node in ast.walk(tree):
-                if not isinstance(node, allowed):
-                    raise PipelineValidationError(f"Unsupported calc feature: {type(node).__name__}")
-                if isinstance(node, ast.Name) and node.id not in {"objects", "average"}:
-                    raise PipelineValidationError(f"Unknown calc name: {node.id}")
-                if isinstance(node, ast.Call) and not isinstance(node.func, ast.Name):
-                    raise PipelineValidationError("Only average(...) calls are allowed")
-                if isinstance(node, ast.Call) and node.func.id != "average":
-                    raise PipelineValidationError("Only average(...) calls are allowed")
-                if isinstance(node, ast.Attribute) and node.attr not in ALLOWED_ATTRIBUTES:
-                    raise PipelineValidationError(f"Unknown object attribute: {node.attr}")
+            left_text = _numeric(left)
+        if isinstance(right, ast.Constant):
+            right_text = _literal(right)
+        elif isinstance(right, ast.Name) and right.id in ALLOWED_ATTRIBUTES:
+            right_text = right.id
+        else:
+            right_text = _numeric(right)
+        op = {ast.Eq: "==", ast.NotEq: "!=", ast.Lt: "<", ast.LtE: "<=", ast.Gt: ">", ast.GtE: ">="}[type(node.ops[0])]
+        return f"({left_text} {op} {right_text})"
+    _invalid()
+
+
+def _relations(node: ast.expr) -> str:
+    if isinstance(node, ast.BoolOp) and isinstance(node.op, (ast.And, ast.Or)):
+        op = "and" if isinstance(node.op, ast.And) else "or"
+        return "(" + f" {op} ".join(_relations(value) for value in node.values) + ")"
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.Not):
+        return f"(not {_relations(node.operand)})"
+    if isinstance(node, ast.Name) and node.id in ALLOWED_PREDICATES:
+        return node.id
+    _invalid("Only relation predicates and boolean operators are allowed here")
+
+
+def _assignments(source: str, operation: str) -> str:
+    parts = source.split(";")
+    if not 1 <= len(parts) <= 4:
+        _invalid("Use one to four assignments")
+    result = []
+    for part in parts:
+        if "=" not in part:
+            _invalid("Assignment requires key = expression")
+        key, expression = (value.strip() for value in part.split("=", 1))
+        if not _ASSIGNMENT_KEY.fullmatch(key):
+            _invalid("Invalid assignment key")
+        node = _tree(expression)
+        if operation == "map" and key in {"label", "type", "supertype", "look"}:
+            value = _literal(node, string_limit=160 if key == "look" else 80)
+            if not isinstance(node.value, str):
+                _invalid("Text fields require a string literal")
+        elif operation == "map" and key in {"volumeLitres", "workbenchScore"}:
+            value = _numeric(node)
+        elif operation == "calc" and key not in ALLOWED_ATTRIBUTES and key not in {"objects", "average", "base"}:
+            value = _numeric(node, allow_average=True)
+        else:
+            _invalid("Assignment target is not editable")
+        result.append(f"{key} = {value}")
+    return "; ".join(result)
 
 
 def validate_pipeline(pipeline: str) -> List[str]:
-    if any(token in pipeline for token in ("__", "\\", "\n", "\r", "`")):
-        raise PipelineValidationError("Pipeline contains a blocked token")
-    operations = [part.strip() for part in pipeline.split("|") if part.strip()]
-    if not operations or len(operations) > 12:
-        raise PipelineValidationError("Pipeline must contain between 1 and 12 operations")
-
-    for operation in operations:
-        name, content = _parse_operation(operation)
+    """Return canonical stages; never pass the caller's source to SRpy."""
+    if len(pipeline) > 800 or any(token in pipeline for token in ("__", "\\", "\n", "\r", "`")):
+        _invalid("Pipeline contains blocked content")
+    parts = pipeline.split("|")
+    if not 1 <= len(parts) <= 12 or any(not part.strip() for part in parts):
+        _invalid("Pipeline must contain 1–12 stages")
+    operations = []
+    for part in parts:
+        match = re.fullmatch(r"([a-z]+)\((.*)\)", part.strip())
+        if not match or match.group(1) not in ALLOWED_OPERATIONS:
+            _invalid("Unknown pipeline operation")
+        name, content = match.group(1), match.group(2).strip()
         if name == "deduce":
-            categories = set(re.findall(r"[a-z]+", content.lower()))
-            unknown = categories - {"topology", "connectivity", "comparability", "similarity", "visibility", "sectoriality", "geography"}
-            if unknown or not categories:
-                raise PipelineValidationError(f"Unknown deduce categories: {', '.join(sorted(unknown))}")
+            categories = content.lower().split()
+            if not categories or any(category not in DEDUCTION_CATEGORIES for category in categories):
+                _invalid("Unknown deduction category")
+            canonical = " ".join(dict.fromkeys(categories))
         elif name == "filter":
-            _validate_ast(content, ALLOWED_ATTRIBUTES)
+            canonical = _filter(_tree(content))
         elif name == "pick":
-            _validate_relation_expression(content)
+            canonical = _relations(_tree(content))
         elif name == "select":
-            parts = [part.strip() for part in content.split("?")]
-            if len(parts) > 2:
-                raise PipelineValidationError("select accepts at most one ? condition")
-            _validate_relation_expression(parts[0])
-            if len(parts) == 2:
-                _validate_ast(parts[1], ALLOWED_ATTRIBUTES)
+            terms = content.split("?")
+            if len(terms) > 2:
+                _invalid("Select accepts one optional condition")
+            canonical = _relations(_tree(terms[0].strip()))
+            if len(terms) == 2:
+                canonical += " ? " + _filter(_tree(terms[1].strip()))
         elif name == "sort":
-            if not re.fullmatch(r"[A-Za-z][A-Za-z0-9]*(?:\.(?:delta|angle))?(?:\s+[<>])?(?:\s+\d+)?", content):
-                raise PipelineValidationError("Invalid sort expression")
-            attribute = content.split()[0].split(".")[0]
-            if attribute not in ALLOWED_ATTRIBUTES and attribute not in ALLOWED_PREDICATES:
-                raise PipelineValidationError(f"Unknown sort attribute: {attribute}")
+            sort = re.fullmatch(r"([A-Za-z][A-Za-z0-9]*)(\.(?:delta|angle))?(?:\s+([<>]))?(?:\s+(\d+))?", content)
+            if not sort or sort.group(1) not in ALLOWED_ATTRIBUTES | ALLOWED_PREDICATES:
+                _invalid("Invalid sort expression")
+            if sort.group(4) and not 1 <= int(sort.group(4)) <= 12:
+                _invalid("Sort backtrace is out of range")
+            canonical = sort.group(1) + (sort.group(2) or "") + (f" {sort.group(3)}" if sort.group(3) else "") + (f" {int(sort.group(4))}" if sort.group(4) else "")
         elif name == "slice":
-            if not re.fullmatch(r"-?\d+(?:\.\.?-?\d+)?", content):
-                raise PipelineValidationError("slice accepts a 1-based number or range")
-        elif name in {"calc", "map"}:
-            _validate_assignments(content, name)
+            slice_match = re.fullmatch(r"(-?\d+)(?:(\.\.?)(-?\d+))?", content)
+            if not slice_match:
+                _invalid("Invalid slice range")
+            values = [int(slice_match.group(1))]
+            if slice_match.group(3) is not None:
+                values.append(int(slice_match.group(3)))
+            if any(value == 0 or abs(value) > 48 for value in values):
+                _invalid("Slice index is out of range")
+            canonical = str(values[0]) + (".." + str(values[1]) if len(values) == 2 else "")
+        else:
+            canonical = _assignments(content, name)
+        operations.append(f"{name}({canonical})")
     return operations
-

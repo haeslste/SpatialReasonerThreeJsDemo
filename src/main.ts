@@ -220,9 +220,20 @@ async function executeReasoning(pipeline: string, fromMovement = false): Promise
   } catch (error) {
     if (controller.signal.aborted) return false;
     if (sequence !== requestSequence) return false;
-    const offline = !(error instanceof ApiError) || error.status >= 500;
-    if (offline) setBackendState("offline", "Engine unavailable");
-    setReasoningState("error", "Reasoning rejected");
+    const status = error instanceof ApiError ? error.status : 0;
+    if (status === 429) {
+      setReasoningState("pending", "Engine busy · retry shortly");
+    } else if (status === 504) {
+      setReasoningState("error", "Reasoning timed out");
+    } else if (status === 413) {
+      setReasoningState("error", "Scene request too large");
+    } else if (status === 503) {
+      setBackendState("offline", "Worker unavailable");
+      setReasoningState("error", "Worker unavailable");
+    } else {
+      if (!status) setBackendState("offline", "Engine unavailable");
+      setReasoningState("error", "Reasoning rejected");
+    }
     showToast(errorMessage(error), true);
     return false;
   } finally {

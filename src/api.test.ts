@@ -39,11 +39,9 @@ describe("API response mapping", () => {
     expect(normalized.relations).toHaveLength(1);
   });
 
-  it("sends only editable SRpy inputs and display metadata", () => {
+  it("sends only geometry and stable IDs", () => {
     const editable = toEditableObjects([{ ...object, volume: 99, center: [0, 1, 0] }]);
-    expect(editable[0]).not.toHaveProperty("volume");
-    expect(editable[0]).not.toHaveProperty("center");
-    expect(editable[0].visualKind).toBe("mug");
+    expect(editable[0]).toEqual({ id: "mug", position: [0, 0.77, 0], width: 0.3, height: 0.4, depth: 0.3, angle: 0 });
   });
 
   it("keeps edited geometry but does not carry deductions from one query into the next", () => {

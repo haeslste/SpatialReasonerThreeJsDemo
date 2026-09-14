@@ -24,6 +24,15 @@ export interface SpatialObjectData {
   [key: string]: unknown;
 }
 
+export interface ObjectGeometryInput {
+  id: string;
+  position: [number, number, number];
+  width: number;
+  height: number;
+  depth: number;
+  angle: number;
+}
+
 export interface Preset {
   id: string;
   label: string;

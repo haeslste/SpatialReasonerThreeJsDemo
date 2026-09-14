@@ -3,12 +3,67 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      target: web-runtime
     restart: unless-stopped
+    init: true
+    user: "10001:10001"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 256m
+    cpus: 0.5
+    pids_limit: 32
+    environment:
+      APP_ENV: production
+      PUBLIC_HOST: spatial-reasoner.stevenhaesler.ch
+      REASONER_WORKER_URL: http://reasoner-worker:8001
+    depends_on:
+      reasoner-worker:
+        condition: service_healthy
     expose:
       - "8000"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=3)"]
       interval: 20s
       timeout: 4s
-      start_period: 15s
+      start_period: 25s
       retries: 3
+    logging:
+      options:
+        max-size: 10m
+        max-file: "3"
+
+  reasoner-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: worker-runtime
+    restart: unless-stopped
+    init: true
+    user: "10001:10001"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 768m
+    cpus: 1.0
+    pids_limit: 32
+    labels:
+      traefik.enable: "false"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/internal/health', timeout=3)"]
+      interval: 20s
+      timeout: 4s
+      start_period: 25s
+      retries: 3
+    logging:
+      options:
+        max-size: 10m
+        max-file: "3"

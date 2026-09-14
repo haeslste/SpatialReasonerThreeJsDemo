@@ -1,4 +1,4 @@
-import type { ReasonResponse, ReasonSettings, RelationsResponse, SceneResponse, SpatialObjectData } from "./types";
+import type { ObjectGeometryInput, ReasonResponse, ReasonSettings, RelationsResponse, SceneResponse, SpatialObjectData } from "./types";
 
 const API_ROOT = import.meta.env.VITE_API_URL ?? "";
 
@@ -59,27 +59,14 @@ export function relationsForObject(
   });
 }
 
-export function toEditableObjects(objects: SpatialObjectData[]): SpatialObjectData[] {
+export function toEditableObjects(objects: SpatialObjectData[]): ObjectGeometryInput[] {
   return objects.map((object) => ({
     id: object.id,
-    label: object.label,
-    type: object.type,
-    supertype: object.supertype,
     position: [...object.position] as [number, number, number],
     width: object.width,
     height: object.height,
     depth: object.depth,
     angle: object.angle,
-    immobile: object.immobile,
-    existence: object.existence ?? "real",
-    cause: object.cause ?? "unknown",
-    shape: object.shape ?? "unknown",
-    look: object.look ?? "",
-    visible: object.visible ?? false,
-    focused: object.focused ?? false,
-    confidence: object.confidence ?? 0.9,
-    visualKind: object.visualKind,
-    color: object.color,
   }));
 }
 

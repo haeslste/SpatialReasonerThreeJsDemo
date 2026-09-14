@@ -24,7 +24,15 @@ This is **oriented-bounding-box symbolic inference with configurable spatial fuz
 
 The backend imports the published `spatial-reasoner==0.1.0` package from PyPI. No sibling SRpy checkout is required.
 
-### Backend
+The supported local path runs the web/API and the isolated inference worker as one Compose package:
+
+```bash
+docker compose -f compose.yaml -f compose.local.yaml up --build -d
+```
+
+Open `http://127.0.0.1:8000` and check `http://127.0.0.1:8000/api/health`. Only the web service is published on loopback; the worker remains internal. If port 8000 is occupied, set `SPATIAL_REASONER_PORT` in your shell before starting Compose.
+
+### Source-development mode
 
 From `SpatialReasonerThreeJsDemo`:
 
@@ -33,12 +41,19 @@ python3.12 -m venv .venv
 source .venv/bin/activate
 pip install -r backend/requirements.txt
 cd backend
-uvicorn app.main:app --reload
+OPENBLAS_NUM_THREADS=1 uvicorn app.main_worker:app --host 127.0.0.1 --port 8001
 ```
 
-The API runs at `http://127.0.0.1:8000`. Interactive API documentation is available at `http://127.0.0.1:8000/docs`.
+In a second terminal with the same environment, start the web API:
 
-### Frontend
+```bash
+cd backend
+REASONER_WORKER_URL=http://127.0.0.1:8001 uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
+```
+
+Interactive API documentation is available at `http://127.0.0.1:8000/docs` in source-development mode only.
+
+### Frontend development server
 
 In a second terminal, from `SpatialReasonerThreeJsDemo`:
 
@@ -70,10 +85,10 @@ Open `http://127.0.0.1:5173`. Vite proxies `/api` to the local FastAPI server.
 
 ```text
 Three.js scene + DOM UI
-  └─ stable object IDs, dimensions, base-center positions, yaw radians
-       └─ POST /api/reason (debounced and abortable)
-            └─ validated pipeline + Pydantic scene schema
-                 └─ spatial_reasoner SpatialObject / SpatialReasoner
+  └─ authored IDs + editable dimensions, base-center positions, yaw radians
+       └─ bounded POST /api/reason or /api/relations
+            └─ web: exact authored scene validation + canonical pipeline grammar + work gate
+                 └─ internal HTTP to unrouted worker: two prewarmed, killable SRpy children
                       └─ result IDs, serialized objects, relations, trace, timing
                            └─ visual overlays + inspector proof
 ```
@@ -84,8 +99,10 @@ The boundaries are intentionally explicit:
 - `src/scene/collision.ts` owns support-surface bounds and swept observer–obstacle checks; it is separate from SRpy inference.
 - `src/api.ts` owns transport and maps backend responses onto stable client display metadata.
 - `src/main.ts` owns UI state, request sequencing, presets, the inspector, and the execution trace.
-- `backend/app/srpy_adapter.py` converts Pydantic inputs to SRpy objects and serializes genuine framework output.
-- `backend/app/security.py` constrains the pipeline language before it reaches SRpy's expression evaluators.
+- `backend/app/main.py` is the public web/API boundary. It never imports SRpy and accepts only the authored ID set plus bounded geometry.
+- `backend/app/engine_pool.py` supervises two disposable SRpy child processes; `backend/app/main_worker.py` is the internal worker API.
+- `backend/app/srpy_adapter.py` reconstructs authored semantics, converts geometry to SRpy objects, and serializes genuine framework output.
+- `backend/app/security.py` parses and reserializes a typed, bounded pipeline grammar before any expression reaches SRpy.
 - `backend/app/scene.py` is the authoritative default scene and preset catalog.
 
 SRpy positions are the center of the bounding-box base (`x, y, z`), dimensions are metres, and `angle` is yaw in radians. The renderer mirrors SRpy's x-axis into the visual coordinate system so a framework `left` result appears on the observer's visual left while preserving all calculations in Python.
@@ -94,37 +111,27 @@ The backend also returns `nearbyRadius` for every object. This value is evaluate
 
 ## Docker and Dokploy
 
-The production image contains the built Vite client, bundled Kenney models, and FastAPI API in one non-root container. FastAPI serves the frontend at `/`, the API at `/api`, and the health probe at `/api/health`, so Dokploy only routes one service and one subdomain.
+`compose.yaml` defines one deployable package with two services. `spatial-reasoner` serves the built Vite client at `/`, the public API at `/api`, and the health probe at `/api/health`. `reasoner-worker` is internal, has no published port, and explicitly disables Traefik routing. Only the web service should receive the one public subdomain.
 
-The image installs `spatial-reasoner==0.1.0` from PyPI through the backend's runtime
-requirements. It does not clone or patch the SRPy repository, and no reasoning code is
-reimplemented in JavaScript.
+Only the worker image installs `spatial-reasoner==0.1.0` from PyPI. It does not clone or patch SRpy; no reasoning code is reimplemented in JavaScript. The web image has no SRpy dependency.
 
-Build and run the production image locally:
+Run the complete package locally:
 
 ```bash
-docker build -t spatial-reasoner-workbench .
-docker run --rm -p 8000:8000 spatial-reasoner-workbench
+docker compose -f compose.yaml -f compose.local.yaml up --build -d
+docker compose -f compose.yaml -f compose.local.yaml ps
 ```
 
-Then open `http://127.0.0.1:8000` and verify `http://127.0.0.1:8000/api/health`.
+Open `http://127.0.0.1:8000`; `0.0.0.0` is a server bind address, not a browser URL. The local override alone publishes web port 8000 on loopback. Never include `compose.local.yaml` in Dokploy.
 
-To test the exact Compose service locally while keeping the Dokploy definition free of public host ports, include the local override:
+Dokploy release checklist (do not deploy the checkpoint commit):
 
-```bash
-docker compose -f compose.yaml -f compose.local.yaml up --build
-```
+1. Enable [Isolated Deployments](https://docs.dokploy.com/docs/core/docker-compose/utilities) for this Compose service and use only `./compose.yaml`. Inspect the generated Compose preview before deployment: it must contain no worker router and no worker published host port.
+2. Route `spatial-reasoner.stevenhaesler.ch` (or the chosen host) to service `spatial-reasoner`, internal port `8000`, path `/`, with HTTPS enabled. If changing the host, set `PUBLIC_HOST` to that exact hostname. Do not create a domain for `reasoner-worker`.
+3. Verify DNS points to the VPS, the certificate is valid, and the host firewall exposes only the intended public HTTP/HTTPS ports; do not expose 8000 or 8001 publicly. Restrict Dokploy/SSH administration separately.
+4. Confirm `/api/health`, the default scene, all presets, worker restart, overload responses, and p95 latency below 300 ms on the VPS without starving the main site. Keep access restricted until these checks pass, then deploy only the hardened revision.
 
-Open `http://127.0.0.1:8000`—`0.0.0.0` is a server bind address and is not the browser URL.
-
-For Dokploy:
-
-1. Push this `SpatialReasonerThreeJsDemo` repository, then create a **Docker Compose** service from that Git source.
-2. Set the Compose path to `./compose.yaml`. The file intentionally uses `expose: 8000` and does not publish a host port.
-3. In the service's **Domains** tab, add the desired subdomain, choose service `spatial-reasoner`, container port `8000`, path `/`, and enable HTTPS with Let's Encrypt.
-4. Add an `A`/`AAAA` DNS record for the subdomain pointing to the Dokploy server, then deploy. Domain changes on a Compose service require a redeploy.
-
-The container binds Uvicorn to `0.0.0.0`, honors reverse-proxy forwarding headers, includes an image and Compose health check, and needs no persistent volume or runtime secret.
+Both services run non-root with read-only root filesystems, dropped capabilities, `no-new-privileges`, and process/memory/CPU limits. Web is capped at 256 MiB / 0.5 CPU, worker at 768 MiB / 1 CPU. The worker owns two prewarmed child processes, enforces a two-second request deadline, and replaces a timed-out or crashed child. Neither service trusts proxy headers from every address. No persistent volume or runtime secret is needed.
 
 ## API
 
@@ -139,9 +146,7 @@ The normal query response includes `relationScopeIds` so the browser knows which
 
 The pinned SRpy 0.1.0 release references an undefined `sameperimeter` predicate for certain size pairs. When that branch is reached, the adapter preserves the pair's other predicates and reports the omitted similarity category in `relationWarnings`; it never substitutes a different predicate as a purported result.
 
-Requests are limited to 48 objects, bounded coordinates and dimensions, and an 800-character / 12-stage pipeline. Only `deduce`, `filter`, `pick`, `select`, `sort`, `slice`, `calc`, and `map` are exposed. Expressions are parsed into a conservative AST allowlist; dunder access, imports, arbitrary calls, unknown fields, and unsupported operations are rejected. CORS accepts only the two local Vite origins.
-
-The advanced console is intended only for this local demonstration. It is not an unrestricted public query service.
+Anonymous requests must contain exactly the 42 authored IDs and only their editable geometry. The server reconstructs labels, types, and other semantics. It rejects extra/missing/duplicate IDs, extra object fields, non-finite or out-of-bounds numbers, and bodies above 64 KiB. Pipelines are limited to 800 characters and 12 stages. Only `deduce`, `filter`, `pick`, `select`, `sort`, `slice`, `calc`, and `map` are exposed through a canonical grammar; exponentiation, string repetition, arbitrary calls, attribute traversal, huge literals, and excessive depth are rejected. The web process admits at most 12 expensive requests/second (burst 24), two active jobs, and four waiting jobs. Responses use concise 400/413/429/503/504 errors without request echoes or Python tracebacks. CORS accepts only the two local Vite origins; the production UI uses same-origin requests.
 
 ## Preset pipelines
 
@@ -188,6 +193,8 @@ npm run build
 
 `backend/tests/test_adapter.py::test_moving_object_changes_left_relation_result` proves that moving the mug across the laptop changes the SRpy pipeline result. The frontend test checks stable-ID response mapping and confirms that derived backend fields are not resent as editable inputs.
 
+`backend/tests/test_hardening.py` covers every preset's canonical grammar, prohibited arithmetic/execution forms, burst and queue limits, actual child timeout and replacement, crash recovery, and idle-child repair. `backend/tests/test_api.py` covers strict scene validation, 64 KiB body limits, and distinct busy/timeout/offline responses. Before any public release, also run `npm audit --omit=dev`, `pip-audit` against both built images, `docker compose config --quiet`, and a warm single-visitor p95 benchmark on the target VPS.
+
 ## Known limitations
 
 - SRpy reasons over oriented bounding boxes, not detailed meshes; imported and procedural models are explanatory renderings of those boxes.
@@ -197,6 +204,8 @@ npm run build
 - The flat is intentionally roofless and single-level so the measured building elements and relations remain inspectable.
 - Relation thresholds are research settings. “Near” and “tangible” should be calibrated for a target robot, sensor, and task before deployment.
 - Pipelines use SRpy's real formal syntax. The UI does not claim to parse unrestricted natural language.
+- Previously browser-saved pipelines remain in local storage, but a pipeline outside the public grammar now receives a validation error when run; it is not silently deleted.
+- Process and request limits reduce denial-of-service risk but do not amount to a formal security audit. Keep the subdomain restricted until target-VPS checks, TLS, firewall, and Dokploy isolation are verified.
 
 ## Open 3D asset provenance
 

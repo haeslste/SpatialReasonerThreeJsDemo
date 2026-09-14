@@ -13,6 +13,7 @@ from .models import (
     RelationsRequest,
     RelationsResponse,
     TraceOutput,
+    canonical_scene_objects,
 )
 from .security import validate_pipeline
 
@@ -27,8 +28,7 @@ def _build_reasoner(objects: Sequence[Any], settings: Any) -> SpatialReasoner:
     reasoner.adjustment.maxGap = settings.maxGap
 
     spatial_objects: List[SpatialObject] = []
-    for payload in objects:
-        data = payload.model_dump(exclude_none=True)
+    for data in objects:
         obj = SpatialObject(id=data["id"])
         obj.fromAny(data)
         spatial_objects.append(obj)
@@ -162,7 +162,7 @@ def _trace(reasoner: SpatialReasoner, operations: Sequence[str], original_ids: S
                 inputIds=input_ids,
                 outputIds=result_ids,
                 succeeded=not bool(inference.error),
-                error=inference.error or None,
+                error="Stage could not be evaluated" if inference.error else None,
             )
         )
         current_ids = result_ids
@@ -172,9 +172,9 @@ def _trace(reasoner: SpatialReasoner, operations: Sequence[str], original_ids: S
 def reason_scene(request: ReasonRequest) -> ReasonResponse:
     started = time.perf_counter()
     operations = validate_pipeline(request.pipeline)
-    reasoner = _build_reasoner(request.objects, request.settings)
+    reasoner = _build_reasoner(canonical_scene_objects(request.objects), request.settings)
     original_ids = [obj.id for obj in reasoner.objects]
-    reasoner.run(request.pipeline)
+    reasoner.run(" | ".join(operations))
     result_ids = [obj.id for obj in reasoner.result()]
     trace = _trace(reasoner, operations, original_ids)
     failed = next((step.error for step in trace if step.error), None)
@@ -202,7 +202,7 @@ def reason_scene(request: ReasonRequest) -> ReasonResponse:
 
 def relations_for_object(request: RelationsRequest) -> RelationsResponse:
     started = time.perf_counter()
-    reasoner = _build_reasoner(request.objects, request.settings)
+    reasoner = _build_reasoner(canonical_scene_objects(request.objects), request.settings)
     reasoner.deduce_categories("topology connectivity comparability similarity visibility")
     if reasoner.index_of_id(request.objectId) is None:
         raise ValueError(f"Unknown object ID: {request.objectId}")

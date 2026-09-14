@@ -5,11 +5,18 @@ import pytest
 from app.models import ReasonRequest, ReasonSettings
 from app.scene import PRESETS, default_scene
 from app.security import PipelineValidationError, validate_pipeline
-from app.srpy_adapter import reason_scene
+from app.srpy_adapter import _all_relations, _build_reasoner, reason_scene
+
+
+def geometry(objects):
+    return [
+        {key: obj[key] for key in ("id", "position", "width", "height", "depth", "angle")}
+        for obj in objects
+    ]
 
 
 def request_for(pipeline: str, objects=None) -> ReasonRequest:
-    return ReasonRequest(objects=objects or default_scene(), pipeline=pipeline)
+    return ReasonRequest(objects=geometry(objects if objects is not None else default_scene()), pipeline=pipeline)
 
 
 def test_default_scene_matches_spatial_object_schema() -> None:
@@ -24,7 +31,7 @@ def test_near_radius_parameters_are_evaluated_by_srpy() -> None:
     pipeline = "filter(id == 'mug')"
     fixed = reason_scene(
         ReasonRequest(
-            objects=default_scene(),
+            objects=geometry(default_scene()),
             pipeline=pipeline,
             settings=ReasonSettings(nearbySchema="fixed", nearbyFactor=0.7, nearbyLimit=5),
         )
@@ -34,7 +41,7 @@ def test_near_radius_parameters_are_evaluated_by_srpy() -> None:
 
     capped = reason_scene(
         ReasonRequest(
-            objects=default_scene(),
+            objects=geometry(default_scene()),
             pipeline=pipeline,
             settings=ReasonSettings(nearbySchema="circle", nearbyFactor=5, nearbyLimit=0.2),
         )
@@ -68,3 +75,18 @@ def test_moving_object_changes_left_relation_result() -> None:
     mug["position"][0] = -1.5
     after = reason_scene(request_for(pipeline, after_objects))
     assert "mug" not in after.resultIds
+
+
+def test_missing_srpy_similarity_predicate_preserves_other_relations() -> None:
+    objects = [
+        {"id": "reference", "label": "Reference", "type": "Box", "supertype": "Object", "position": [0, 0, 0], "width": 1, "height": 1, "depth": 1},
+        {"id": "subject", "label": "Subject", "type": "Box", "supertype": "Object", "position": [4, 0, 0], "width": 1, "height": 1, "depth": 2},
+    ]
+    reasoner = _build_reasoner(objects, ReasonSettings())
+    reasoner.deduce_categories("topology connectivity comparability similarity visibility")
+    relations, warnings = _all_relations(reasoner, only_ids=["reference"])
+    assert relations
+    assert not any(relation.predicate == "same perimeter" for relation in relations)
+    assert [warning.model_dump() for warning in warnings] == [
+        {"subjectId": "subject", "referenceId": "reference", "category": "similarity"}
+    ]
