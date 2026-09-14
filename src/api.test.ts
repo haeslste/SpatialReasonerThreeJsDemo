@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { normalizeReasonResponse, toEditableObjects } from "./api";
+import { canonicalSceneInputs, normalizeReasonResponse, toEditableObjects } from "./api";
 import type { ReasonResponse, SpatialObjectData } from "./types";
 
 const object: SpatialObjectData = {
@@ -27,6 +27,7 @@ describe("API response mapping", () => {
         { subjectId: "mug", predicate: "left", objectId: "mug", description: "demo", delta: 1, yaw: 0 },
         { subjectId: "missing", predicate: "near", objectId: "mug", description: "bad", delta: 1, yaw: 0 },
       ],
+      relationScopeIds: ["mug"],
       trace: [],
       timingMs: 1,
       error: null,
@@ -43,5 +44,22 @@ describe("API response mapping", () => {
     expect(editable[0]).not.toHaveProperty("volume");
     expect(editable[0]).not.toHaveProperty("center");
     expect(editable[0].visualKind).toBe("mug");
+  });
+
+  it("keeps edited geometry but does not carry deductions from one query into the next", () => {
+    const baseline = { ...object, visible: false, focused: false, cause: "authored" };
+    const afterReasoning = {
+      ...object,
+      position: [2, 0.77, 1] as [number, number, number],
+      width: 0.45,
+      angle: Math.PI / 2,
+      visible: true,
+      focused: true,
+      cause: "inferred",
+      nearbyRadius: 4,
+    };
+    const input = canonicalSceneInputs([afterReasoning], [baseline])[0];
+    expect(input).toMatchObject({ position: [2, 0.77, 1], width: 0.45, angle: Math.PI / 2, visible: false, focused: false, cause: "authored" });
+    expect(input).not.toHaveProperty("nearbyRadius");
   });
 });

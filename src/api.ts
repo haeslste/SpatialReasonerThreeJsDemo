@@ -1,4 +1,4 @@
-import type { ReasonResponse, ReasonSettings, SceneResponse, SpatialObjectData } from "./types";
+import type { ReasonResponse, ReasonSettings, RelationsResponse, SceneResponse, SpatialObjectData } from "./types";
 
 const API_ROOT = import.meta.env.VITE_API_URL ?? "";
 
@@ -34,12 +34,27 @@ export function reason(
   objects: SpatialObjectData[],
   pipeline: string,
   settings: ReasonSettings,
+  focusObjectId?: string | null,
   signal?: AbortSignal,
 ): Promise<ReasonResponse> {
   return jsonRequest("/api/reason", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ objects: toEditableObjects(objects), pipeline, settings }),
+    body: JSON.stringify({ objects: toEditableObjects(objects), pipeline, settings, focusObjectId }),
+    signal,
+  });
+}
+
+export function relationsForObject(
+  objects: SpatialObjectData[],
+  objectId: string,
+  settings: ReasonSettings,
+  signal?: AbortSignal,
+): Promise<RelationsResponse> {
+  return jsonRequest("/api/relations", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ objects: toEditableObjects(objects), objectId, settings }),
     signal,
   });
 }
@@ -66,6 +81,23 @@ export function toEditableObjects(objects: SpatialObjectData[]): SpatialObjectDa
     visualKind: object.visualKind,
     color: object.color,
   }));
+}
+
+/** Reuse authored scene semantics while preserving the user's current geometry. */
+export function canonicalSceneInputs(currentObjects: SpatialObjectData[], initialObjects: SpatialObjectData[]): SpatialObjectData[] {
+  const initialById = new Map(initialObjects.map((object) => [object.id, object]));
+  return currentObjects.map((current) => {
+    const baseline = initialById.get(current.id) ?? current;
+    return {
+      ...baseline,
+      position: [...current.position] as [number, number, number],
+      width: current.width,
+      height: current.height,
+      depth: current.depth,
+      angle: current.angle,
+      immobile: current.immobile,
+    };
+  });
 }
 
 export function normalizeReasonResponse(

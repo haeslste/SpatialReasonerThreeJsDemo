@@ -1,11 +1,16 @@
 import "./styles.css";
 
-import { ApiError, getDefaultScene, getHealth, normalizeReasonResponse, reason } from "./api";
+import { ApiError, canonicalSceneInputs, getDefaultScene, getHealth, normalizeReasonResponse, reason, relationsForObject } from "./api";
+import { parsePipeline, serializePipeline, STAGE_DEFAULTS, type PipelineStage, type StageKind } from "./pipelineEditor";
+import { graphPredicateOptions, layoutGraphNodes, selectedObjectGraphEdges, type GraphPoint } from "./relationGraph";
 import { WorkbenchScene } from "./scene/WorkbenchScene";
+import { pipelineProofRelations, type PipelineProof } from "./scene/proofRelations";
+import { carriedTabletopObjects } from "./scene/tabletop";
 import type {
   Preset,
   ReasonResponse,
   ReasonSettings,
+  RelationWarningData,
   SpatialObjectData,
   SpatialRelationData,
   TraceStage,
@@ -21,18 +26,31 @@ const settings: ReasonSettings = {
 let objects: SpatialObjectData[] = [];
 let initialObjects: SpatialObjectData[] = [];
 let presets: Preset[] = [];
+let savedPipelines: Preset[] = [];
 let selectedId: string | null = null;
 let activePresetId = "";
 let lastResponse: ReasonResponse | null = null;
 let visibleRelations: SpatialRelationData[] = [];
 let requestSequence = 0;
 let activeRequest: AbortController | null = null;
+let relationRequest: AbortController | null = null;
+let relationRequestSequence = 0;
+let queryRelations: SpatialRelationData[] = [];
+let currentProof: PipelineProof = { relations: [], referenceIds: [], operation: null };
+let graphMode: "pipeline" | "selected" = "pipeline";
+let graphSelectedLoadedId: string | null = null;
+let selectedRelationWarnings: RelationWarningData[] = [];
 let reasonDebounce = 0;
+let committedTable: SpatialObjectData | null = null;
 
 const sceneMount = element<HTMLDivElement>("sceneMount");
 const inspector = element<HTMLElement>("inspector");
 const presetTray = element<HTMLDivElement>("presetTray");
 const pipelineInput = element<HTMLInputElement>("pipelineInput");
+const stageList = element<HTMLDivElement>("stageList");
+const editorStatus = element<HTMLSpanElement>("editorStatus");
+const addStageType = element<HTMLSelectElement>("addStageType");
+const pipelineName = element<HTMLInputElement>("pipelineName");
 const runButton = element<HTMLButtonElement>("runButton");
 const resetButton = element<HTMLButtonElement>("resetButton");
 const rotateLeftButton = element<HTMLButtonElement>("rotateLeftButton");
@@ -44,6 +62,13 @@ const traceSummary = element<HTMLSpanElement>("traceSummary");
 const traceBody = element<HTMLDivElement>("traceBody");
 const sceneToast = element<HTMLDivElement>("sceneToast");
 const introDialog = element<HTMLDialogElement>("introDialog");
+const relationGraphDialog = element<HTMLDialogElement>("relationGraphDialog");
+const relationGraphSvg = element<SVGSVGElement>("relationGraphSvg");
+const relationGraphList = element<HTMLElement>("relationGraphList");
+const graphPredicateFilter = element<HTMLSelectElement>("graphPredicateFilter");
+const graphSummary = element<HTMLSpanElement>("graphSummary");
+const graphPipelineTab = element<HTMLButtonElement>("graphPipelineTab");
+const graphSelectedTab = element<HTMLButtonElement>("graphSelectedTab");
 const nearbySchema = element<HTMLSelectElement>("nearbySchema");
 const nearbyFactor = element<HTMLInputElement>("nearbyFactor");
 const nearbyFactorOutput = element<HTMLOutputElement>("nearbyFactorOutput");
@@ -52,19 +77,64 @@ const nearbyLimitOutput = element<HTMLOutputElement>("nearbyLimitOutput");
 const showBounds = element<HTMLInputElement>("showBounds");
 const showNearField = element<HTMLInputElement>("showNearField");
 
-const workbench = new WorkbenchScene(sceneMount, handleSelection, handleObjectChange);
+const workbench = new WorkbenchScene(sceneMount, handleSelection, handleObjectChange, (message) => showToast(message, true));
 
 runButton.addEventListener("click", () => void executeReasoning(pipelineInput.value));
 pipelineInput.addEventListener("keydown", (event) => {
   if (event.key === "Enter") void executeReasoning(pipelineInput.value);
 });
 pipelineInput.addEventListener("input", () => {
-  activePresetId = "";
-  renderPresets();
+  markPipelineEdited();
+  renderPipelineEditor();
 });
+stageList.addEventListener("input", (event) => {
+  if ((event.target as HTMLElement).matches("[data-stage-argument]")) updatePipelineFromStages();
+});
+stageList.addEventListener("change", (event) => {
+  if ((event.target as HTMLElement).matches("[data-stage-kind]")) {
+    const select = event.target as HTMLSelectElement;
+    const row = select.closest<HTMLElement>("[data-stage-index]");
+    const argument = row?.querySelector<HTMLInputElement>("[data-stage-argument]");
+    if (argument) argument.value = STAGE_DEFAULTS[select.value as StageKind];
+    updatePipelineFromStages();
+  }
+});
+stageList.addEventListener("click", (event) => {
+  const button = (event.target as HTMLElement).closest<HTMLButtonElement>("[data-stage-action]");
+  if (!button) return;
+  const stages = parsePipeline(pipelineInput.value);
+  if (!stages) return;
+  const index = Number(button.closest<HTMLElement>("[data-stage-index]")?.dataset.stageIndex);
+  if (!Number.isInteger(index) || index < 0 || index >= stages.length) return;
+  if (button.dataset.stageAction === "remove") stages.splice(index, 1);
+  if (button.dataset.stageAction === "up" && index > 0) [stages[index - 1], stages[index]] = [stages[index], stages[index - 1]];
+  if (button.dataset.stageAction === "down" && index < stages.length - 1) [stages[index + 1], stages[index]] = [stages[index], stages[index + 1]];
+  setEditedPipeline(stages);
+});
+element<HTMLButtonElement>("addStageButton").addEventListener("click", () => {
+  const stages = parsePipeline(pipelineInput.value);
+  if (!stages) { editorStatus.textContent = "Correct the pipeline syntax above before adding a stage."; return; }
+  if (stages.length >= 12) { editorStatus.textContent = "The server accepts at most 12 stages."; return; }
+  const kind = addStageType.value as StageKind;
+  stages.push({ kind, argument: STAGE_DEFAULTS[kind] });
+  setEditedPipeline(stages);
+});
+element<HTMLButtonElement>("savePipelineButton").addEventListener("click", () => void savePipeline());
 resetButton.addEventListener("click", resetScene);
+element<HTMLButtonElement>("exploreButton").addEventListener("click", () => workbench.focusObserver());
 rotateLeftButton.addEventListener("click", () => workbench.rotateSelected(Math.PI / 12));
 rotateRightButton.addEventListener("click", () => workbench.rotateSelected(-Math.PI / 12));
+element<HTMLButtonElement>("relationGraphButton").addEventListener("click", () => {
+  renderRelationGraph();
+  relationGraphDialog.showModal();
+});
+element<HTMLButtonElement>("closeRelationGraphButton").addEventListener("click", () => relationGraphDialog.close());
+relationGraphDialog.addEventListener("click", (event) => {
+  if (event.target === relationGraphDialog) relationGraphDialog.close();
+});
+graphPipelineTab.addEventListener("click", () => { graphMode = "pipeline"; renderRelationGraph(); });
+graphSelectedTab.addEventListener("click", () => { graphMode = "selected"; renderRelationGraph(); });
+graphPredicateFilter.addEventListener("change", renderRelationGraph);
 element<HTMLButtonElement>("helpButton").addEventListener("click", () => showIntroduction());
 element<HTMLButtonElement>("closeIntroButton").addEventListener("click", () => introDialog.close());
 element<HTMLButtonElement>("startButton").addEventListener("click", () => {
@@ -92,12 +162,15 @@ async function initialize(): Promise<void> {
     const [health, scene] = await Promise.all([getHealth(), getDefaultScene()]);
     objects = cloneObjects(scene.objects);
     initialObjects = cloneObjects(scene.objects);
+    rememberTablePose();
     presets = scene.presets;
+    savedPipelines = readSavedPipelines();
     activePresetId = scene.defaultPresetId;
     const activePreset = presets.find((preset) => preset.id === activePresetId) ?? presets[0];
     pipelineInput.value = activePreset?.pipeline ?? "sort(volume >) | slice(1)";
     workbench.setObjects(objects);
     renderPresets();
+    renderPipelineEditor();
     renderInspector();
     setBackendState("online", `${health.engine} online`);
     if (!localStorage.getItem("spatial-workbench-intro")) showIntroduction();
@@ -113,36 +186,45 @@ async function initialize(): Promise<void> {
   }
 }
 
-async function executeReasoning(pipeline: string, fromMovement = false): Promise<void> {
-  if (!objects.length || !pipeline.trim()) return;
+async function executeReasoning(pipeline: string, fromMovement = false): Promise<boolean> {
+  if (!objects.length || !pipeline.trim()) return false;
   const sequence = ++requestSequence;
   activeRequest?.abort();
+  cancelRelationLookup();
   const controller = new AbortController();
   activeRequest = controller;
   setReasoningState("running", fromMovement ? "Updating after geometry change" : "Evaluating pipeline");
   runButton.disabled = true;
   runButton.classList.add("is-running");
   try {
-    const raw = await reason(objects, pipeline.trim(), settings, controller.signal);
-    if (sequence !== requestSequence) return;
+    const raw = await reason(canonicalSceneInputs(objects, initialObjects), pipeline.trim(), settings, null, controller.signal);
+    if (sequence !== requestSequence) return false;
     const response = normalizeReasonResponse(raw, objects);
     lastResponse = response;
+    queryRelations = response.relations;
+    currentProof = pipelineProofRelations(response);
+    graphSelectedLoadedId = null;
+    selectedRelationWarnings = [];
     objects = response.objects;
-    workbench.setObjects(objects);
+    workbench.updateReasoningData(objects);
     workbench.setSelected(selectedId);
-    workbench.setReasoning(response.resultIds, response.relations, activePreset()?.focusPredicate ?? "");
+    workbench.setReasoning(response.resultIds, currentProof.relations);
     setReasoningState(response.success ? "ready" : "error", response.success ? `${response.resultIds.length} result${response.resultIds.length === 1 ? "" : "s"}` : "Pipeline error");
     renderResult();
     renderInspector();
     renderTrace(response.trace, response.timingMs);
+    renderRelationGraphIfOpen();
     if (fromMovement) showToast(`Relations refreshed in ${formatNumber(response.timingMs, 1)} ms`);
+    if (selectedId) void loadSelectedRelations(selectedId);
+    return response.success;
   } catch (error) {
-    if (controller.signal.aborted) return;
-    if (sequence !== requestSequence) return;
+    if (controller.signal.aborted) return false;
+    if (sequence !== requestSequence) return false;
     const offline = !(error instanceof ApiError) || error.status >= 500;
     if (offline) setBackendState("offline", "Engine unavailable");
     setReasoningState("error", "Reasoning rejected");
     showToast(errorMessage(error), true);
+    return false;
   } finally {
     if (sequence === requestSequence) {
       runButton.disabled = false;
@@ -152,24 +234,158 @@ async function executeReasoning(pipeline: string, fromMovement = false): Promise
 }
 
 function renderPresets(): void {
-  presetTray.innerHTML = presets
+  presetTray.innerHTML = [...presets, ...savedPipelines]
     .map(
       (preset, index) => `
-        <button class="preset-chip ${preset.id === activePresetId ? "active" : ""}" data-preset-id="${escapeHtml(preset.id)}" type="button" role="listitem" title="${escapeHtml(preset.description)}">
+        <span class="preset-entry" role="listitem"><button class="preset-chip ${preset.id === activePresetId ? "active" : ""}" data-preset-id="${escapeHtml(preset.id)}" type="button" title="${escapeHtml(preset.description)}">
           <span>${String(index + 1).padStart(2, "0")}</span>${escapeHtml(preset.shortLabel)}
-        </button>`,
+        </button>${preset.id.startsWith("saved:") ? `<button type="button" class="preset-delete" data-delete-preset="${escapeHtml(preset.id)}" aria-label="Delete ${escapeHtml(preset.label)}">×</button>` : ""}</span>`,
     )
     .join("");
   for (const button of presetTray.querySelectorAll<HTMLButtonElement>("[data-preset-id]")) {
     button.addEventListener("click", () => {
-      activePresetId = button.dataset.presetId ?? "";
-      const preset = activePreset();
+      const preset = [...presets, ...savedPipelines].find((item) => item.id === button.dataset.presetId);
       if (!preset) return;
+      activePresetId = preset.id;
+      graphMode = "pipeline";
       pipelineInput.value = preset.pipeline;
       renderPresets();
+      renderPipelineEditor();
       void executeReasoning(preset.pipeline);
     });
   }
+  for (const button of presetTray.querySelectorAll<HTMLButtonElement>("[data-delete-preset]")) {
+    button.addEventListener("click", () => {
+      savedPipelines = savedPipelines.filter((preset) => preset.id !== button.dataset.deletePreset);
+      persistSavedPipelines();
+      if (activePresetId === button.dataset.deletePreset) activePresetId = "";
+      renderPresets();
+    });
+  }
+}
+
+function renderPipelineEditor(): void {
+  const stages = parsePipeline(pipelineInput.value);
+  if (!stages) {
+    stageList.innerHTML = `<p class="stage-warning">This pipeline cannot be split into stages. Use operation(argument) blocks separated by |.</p>`;
+    editorStatus.textContent = "Formal syntax is checked again by the server when you run it.";
+    return;
+  }
+  stageList.innerHTML = stages.length
+    ? stages.map((stage, index) => `<div class="stage-row" data-stage-index="${index}">
+        <span class="stage-number">${String(index + 1).padStart(2, "0")}</span>
+        <select data-stage-kind aria-label="Stage ${index + 1} operation">${Object.keys(STAGE_DEFAULTS).map((kind) => `<option value="${kind}" ${kind === stage.kind ? "selected" : ""}>${kind}</option>`).join("")}</select>
+        <input data-stage-argument value="${escapeHtml(stage.argument)}" aria-label="Stage ${index + 1} argument" spellcheck="false" />
+        <button type="button" data-stage-action="up" aria-label="Move stage ${index + 1} up" ${index === 0 ? "disabled" : ""}>↑</button>
+        <button type="button" data-stage-action="down" aria-label="Move stage ${index + 1} down" ${index === stages.length - 1 ? "disabled" : ""}>↓</button>
+        <button type="button" data-stage-action="remove" aria-label="Remove stage ${index + 1}">×</button>
+      </div>`).join("")
+    : `<p class="stage-warning">No stages yet. Add one below.</p>`;
+  editorStatus.textContent = `${stages.length}/12 stages · ${pipelineInput.value.length}/800 characters`;
+}
+
+function updatePipelineFromStages(): void {
+  const stages: PipelineStage[] = [...stageList.querySelectorAll<HTMLElement>("[data-stage-index]")].map((row) => ({
+    kind: row.querySelector<HTMLSelectElement>("[data-stage-kind]")!.value as StageKind,
+    argument: row.querySelector<HTMLInputElement>("[data-stage-argument]")!.value,
+  }));
+  pipelineInput.value = serializePipeline(stages);
+  markPipelineEdited();
+  editorStatus.textContent = `${stages.length}/12 stages · ${pipelineInput.value.length}/800 characters`;
+}
+
+function setEditedPipeline(stages: PipelineStage[]): void {
+  pipelineInput.value = serializePipeline(stages);
+  markPipelineEdited();
+  renderPipelineEditor();
+}
+
+function markPipelineEdited(): void {
+  ++requestSequence;
+  activeRequest?.abort();
+  cancelRelationLookup();
+  activePresetId = "";
+  graphMode = "pipeline";
+  lastResponse = null;
+  queryRelations = [];
+  currentProof = { relations: [], referenceIds: [], operation: null };
+  graphSelectedLoadedId = null;
+  selectedRelationWarnings = [];
+  workbench.setReasoning([], []);
+  setReasoningState("pending", "Pipeline edited · run to evaluate");
+  runButton.disabled = false;
+  runButton.classList.remove("is-running");
+  renderResult();
+  renderInspector();
+  renderRelationGraphIfOpen();
+  traceSummary.textContent = "Run the edited pipeline";
+  traceBody.replaceChildren();
+  renderPresets();
+}
+
+const SAVED_PIPELINES_KEY = "spatial-workbench-pipelines-v1";
+
+function readSavedPipelines(): Preset[] {
+  try {
+    const stored: unknown = JSON.parse(localStorage.getItem(SAVED_PIPELINES_KEY) ?? "[]");
+    if (!Array.isArray(stored)) return [];
+    return stored.filter((item): item is { id: string; label: string; pipeline: string } =>
+      item !== null && typeof item === "object" &&
+      typeof item.id === "string" && item.id.startsWith("saved:") &&
+      typeof item.label === "string" && item.label.length > 0 && item.label.length <= 60 &&
+      typeof item.pipeline === "string" && item.pipeline.length <= 800 && parsePipeline(item.pipeline) !== null,
+    ).slice(0, 20).map((item) => ({
+      id: item.id,
+      label: item.label,
+      shortLabel: item.label,
+      description: "Browser-saved research pipeline",
+      pipeline: item.pipeline,
+      focusPredicate: "",
+    }));
+  } catch {
+    return [];
+  }
+}
+
+function persistSavedPipelines(): boolean {
+  try {
+    localStorage.setItem(SAVED_PIPELINES_KEY, JSON.stringify(savedPipelines));
+    return true;
+  } catch {
+    showToast("Browser storage is unavailable; this pipeline cannot be saved here.", true);
+    return false;
+  }
+}
+
+async function savePipeline(): Promise<void> {
+  const label = pipelineName.value.trim();
+  if (!label) { editorStatus.textContent = "Enter a name before saving."; pipelineName.focus(); return; }
+  const pipeline = pipelineInput.value.trim();
+  if (!parsePipeline(pipeline)?.length || pipeline.length > 800) {
+    editorStatus.textContent = "Use 1–12 formal stages and at most 800 characters.";
+    return;
+  }
+  const saveButton = element<HTMLButtonElement>("savePipelineButton");
+  saveButton.disabled = true;
+  const valid = await executeReasoning(pipeline);
+  saveButton.disabled = false;
+  if (!valid) { editorStatus.textContent = "Not saved: the server rejected this pipeline."; return; }
+  const preset: Preset = {
+    id: `saved:${crypto.randomUUID()}`,
+    label,
+    shortLabel: label,
+    description: "Browser-saved research pipeline",
+    pipeline,
+    focusPredicate: "",
+  };
+  const previous = savedPipelines;
+  savedPipelines = [...savedPipelines, preset].slice(-20);
+  if (!persistSavedPipelines()) { savedPipelines = previous; return; }
+  activePresetId = preset.id;
+  renderPresets();
+  renderResult();
+  editorStatus.textContent = `Saved “${label}” in this browser.`;
+  pipelineName.value = "";
 }
 
 function renderResult(): void {
@@ -217,7 +433,7 @@ function renderInspector(): void {
       <div class="inspector-empty">
         <div class="empty-cube" aria-hidden="true"><i></i><i></i><i></i></div>
         <strong>Select an oriented bounding box</strong>
-        <p>Inspect its measurement vector, calibrate its extent, and audit the predicates returned by SRpy.</p>
+        <p>Select an object to inspect its measured box and SRpy relations. Use Explore flat to walk the observer through the rooms.</p>
       </div>
       <div class="authority-note"><span>PY</span><p><strong>Inference authority</strong><br />The browser renders SRpy output; it does not reproduce predicate tests.</p></div>`;
     return;
@@ -231,7 +447,15 @@ function renderInspector(): void {
   const yaw = ((selected.angle * 180) / Math.PI + 360) % 360;
   const poseControl = selected.immobile
     ? `<div class="locked-note"><span>⌁</span> Pose locked; measured box extent remains calibratable.</div>`
-    : `<label class="yaw-control"><span><b>Yaw rotation</b><output id="yawOutput">${formatNumber(yaw, 0)}°</output></span><input id="yawSlider" type="range" min="0" max="359" step="1" value="${yaw}" /></label>`;
+    : `<div class="yaw-control">
+        <label for="yawSlider"><span><b>Rotation · Y axis</b><output id="yawOutput">${formatNumber(yaw, 0)}°</output></span></label>
+        <input id="yawSlider" type="range" min="0" max="359" step="1" value="${yaw}" aria-label="Rotation around the vertical Y axis in degrees" />
+        <div class="yaw-steps" role="group" aria-label="Y-axis rotation steps">
+          <button type="button" data-yaw-step="90" aria-label="Rotate 90 degrees left around Y">↶ 90°</button>
+          <button type="button" data-yaw-step="-90" aria-label="Rotate 90 degrees right around Y">↷ 90°</button>
+          <button type="button" data-yaw-step="180" aria-label="Rotate 180 degrees around Y">180°</button>
+        </div>
+      </div>`;
 
   inspector.innerHTML = `
     <div class="inspector-head">
@@ -253,10 +477,12 @@ function renderInspector(): void {
       <div class="effective-radius"><span>Effective near radius · ${escapeHtml(settings.nearbySchema)}</span><strong>${selected.nearbyRadius === undefined ? "Run pipeline" : `${formatNumber(selected.nearbyRadius, 3)} m`}</strong></div>
     </section>
     ${poseControl}
+    ${selected.id === "observer" ? `<div class="walk-note">Walk with W / A / S / D or arrow keys; hold Shift for a longer step. Turn with Q / E, or drag the observer.</div>` : ""}
     <div class="relation-section-head">
       <div><div class="eyebrow">Detected relations</div><h3>${visibleRelations.length} involving this object</h3></div>
       <span class="relation-source">SRpy</span>
     </div>
+    ${selectedRelationWarnings.length ? `<p class="relation-warning">SRpy omitted similarity predicates for ${selectedRelationWarnings.length} object pair${selectedRelationWarnings.length === 1 ? "" : "s"} because its same-perimeter predicate is unavailable. Other relation categories remain.</p>` : ""}
     <div class="relation-list">
       ${
         visibleRelations.length
@@ -264,7 +490,7 @@ function renderInspector(): void {
           : `<div class="empty-relations">Run a query to populate this object's proof relations.</div>`
       }
     </div>
-    <div class="authority-note"><span>OBB</span><p><strong>Method boundary</strong><br />Predicates approximate spatial structure; they are not collision or path-safety guarantees.</p></div>`;
+    <div class="authority-note"><span>OBB</span><p><strong>Method boundary</strong><br />Tabletop overlaps are user-managed. Walls and floor furnishings constrain the observer; predicates are not path-safety guarantees.</p></div>`;
 
   const yawSlider = inspector.querySelector<HTMLInputElement>("#yawSlider");
   const yawOutput = inspector.querySelector<HTMLOutputElement>("#yawOutput");
@@ -276,6 +502,9 @@ function renderInspector(): void {
     const degrees = Number(yawSlider.value);
     workbench.setSelectedAngle((degrees * Math.PI) / 180);
   });
+  for (const button of inspector.querySelectorAll<HTMLButtonElement>("[data-yaw-step]")) {
+    button.addEventListener("click", () => workbench.rotateSelected(Number(button.dataset.yawStep) * Math.PI / 180));
+  }
   for (const input of inspector.querySelectorAll<HTMLInputElement>("[data-dimension]")) {
     input.addEventListener(input.type === "number" ? "input" : "change", () => applyDimension(input));
   }
@@ -317,26 +546,198 @@ function renderTrace(stages: TraceStage[], timingMs: number): void {
     .join("");
 }
 
+function renderRelationGraphIfOpen(): void {
+  if (relationGraphDialog.open) renderRelationGraph();
+}
+
+function renderRelationGraph(): void {
+  graphPipelineTab.setAttribute("aria-selected", String(graphMode === "pipeline"));
+  graphSelectedTab.setAttribute("aria-selected", String(graphMode === "selected"));
+  graphPredicateFilter.parentElement?.classList.toggle("is-hidden", graphMode !== "selected");
+
+  let ids: string[] = [];
+  let edges: { relation: SpatialRelationData; detail: string }[] = [];
+  let listHeading = "";
+  let listNote = "";
+  let emptyMessage = "";
+
+  if (graphMode === "pipeline") {
+    ids = lastResponse ? [...currentProof.referenceIds, ...lastResponse.resultIds] : [];
+    edges = currentProof.relations.map((relation) => ({ relation, detail: relation.description }));
+    graphSummary.textContent = lastResponse ? `${lastResponse.resultIds.length} retained · ${edges.length} proof links` : "No query yet";
+    listHeading = currentProof.operation ? `Proofs · ${currentProof.operation}` : "Pipeline result";
+    listNote = `Only relations that justify retained objects are drawn. Selection does not add unrelated links here.${lastResponse?.relationWarnings?.length ? ` SRpy omitted similarity predicates for ${lastResponse.relationWarnings.length} affected pair${lastResponse.relationWarnings.length === 1 ? "" : "s"}.` : ""}`;
+    emptyMessage = !lastResponse
+      ? "Run a pipeline to build its proof graph."
+      : lastResponse.resultIds.length === 0
+        ? "No objects satisfy this pipeline in the current geometry."
+        : "This result has no pairwise predicate proof in the available relation scope (for example, a scalar sort-and-slice result).";
+  } else if (!selectedId || !lastResponse) {
+    graphSummary.textContent = "Select an object";
+    listHeading = "Selected-object graph";
+    listNote = "Choose an object in the 3D scene or in the pipeline proof graph.";
+    emptyMessage = "Select an object after running a pipeline to inspect its relation network.";
+  } else {
+    ids = [selectedId];
+    const loaded = graphSelectedLoadedId === selectedId;
+    const selectedRelations = loaded
+      ? lastResponse.relations.filter((relation) => relation.subjectId === selectedId || relation.objectId === selectedId)
+      : [];
+    const predicates = graphPredicateOptions(selectedRelations, selectedId);
+    const previousFilter = graphPredicateFilter.value;
+    graphPredicateFilter.innerHTML = `<option value="all">All predicates</option>${predicates.map((predicate) => `<option value="${escapeHtml(predicate)}">${escapeHtml(predicate)}</option>`).join("")}`;
+    graphPredicateFilter.value = predicates.includes(previousFilter) ? previousFilter : "all";
+    const allPeers = selectedObjectGraphEdges(selectedRelations, selectedId);
+    const selectedEdges = selectedObjectGraphEdges(selectedRelations, selectedId, graphPredicateFilter.value);
+    ids.push(...selectedEdges.map((edge) => edge.peerId));
+    edges = selectedEdges.map((edge) => ({ relation: edge.relation, detail: `${edge.relationCount} predicates: ${edge.predicates.join(", ")}` }));
+    graphSummary.textContent = loaded
+      ? `${selectedEdges.length} / ${allPeers.length} peers · ${selectedRelations.length} relations`
+      : "Loading complete relation set";
+    listHeading = `${objectById(selectedId)?.label ?? selectedId} · relation network`;
+    listNote = `One edge per peer; use the predicate filter to inspect different relation types. The object inspector retains every returned predicate.${selectedRelationWarnings.length ? ` SRpy omitted similarity predicates for ${selectedRelationWarnings.length} affected pair${selectedRelationWarnings.length === 1 ? "" : "s"}.` : ""}`;
+    emptyMessage = loaded ? "No relation matches this predicate filter." : "Loading this object's complete relation set from SRpy…";
+  }
+
+  const nodeIds = [...new Set(ids)];
+  const points = layoutGraphNodes(objects, nodeIds);
+  const markers = `<defs>
+    <marker id="graphArrowDirection" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M1 1 L7 4 L1 7 Z" fill="#5489ce" /></marker>
+    <marker id="graphArrowContact" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M1 1 L7 4 L1 7 Z" fill="#bd872e" /></marker>
+    <marker id="graphArrowProximity" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M1 1 L7 4 L1 7 Z" fill="#4b9b75" /></marker>
+    <marker id="graphArrowOther" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M1 1 L7 4 L1 7 Z" fill="#9aa8ad" /></marker>
+  </defs>`;
+  const lines = edges.map(({ relation, detail }) => {
+    const subject = points.get(relation.subjectId);
+    const object = points.get(relation.objectId);
+    if (!subject || !object) return "";
+    const from = graphNodeBoundary(subject, object);
+    const to = graphNodeBoundary(object, subject);
+    const kind = graphEdgeKind(relation.predicate);
+    const marker = kind[0].toUpperCase() + kind.slice(1);
+    const title = `${relationLabel(relation)}${detail ? ` · ${detail}` : ""}`;
+    const label = graphMode === "pipeline"
+      ? `<text class="graph-edge-label" x="${(from.x + to.x) / 2}" y="${(from.y + to.y) / 2 - 6}">${escapeHtml(relation.predicate)}</text>`
+      : "";
+    return `<g><title>${escapeHtml(title)}</title><line class="graph-edge ${kind}" x1="${from.x}" y1="${from.y}" x2="${to.x}" y2="${to.y}" marker-end="url(#graphArrow${marker})" />${label}</g>`;
+  }).join("");
+  const nodes = nodeIds.map((id) => {
+    const point = points.get(id);
+    const object = objectById(id);
+    if (!point || !object) return "";
+    const classes = ["graph-node"];
+    if (lastResponse?.resultIds.includes(id)) classes.push("is-result");
+    if (currentProof.referenceIds.includes(id)) classes.push("is-reference");
+    if (id === selectedId) classes.push("is-selected");
+    const name = object.label || id;
+    const shortName = name.length > 17 ? `${name.slice(0, 16)}…` : name;
+    return `<g class="${classes.join(" ")}" data-graph-id="${escapeHtml(id)}" transform="translate(${point.x} ${point.y})" role="button" tabindex="0" aria-label="Inspect ${escapeHtml(name)}"><title>${escapeHtml(name)} · ${escapeHtml(id)}</title><rect x="-53" y="-16" width="106" height="32" rx="5" /><text>${escapeHtml(shortName)}</text></g>`;
+  }).join("");
+  relationGraphSvg.setAttribute("aria-label", graphMode === "pipeline" ? "Pipeline proof graph" : "Selected-object relation graph");
+  relationGraphSvg.innerHTML = `${markers}${lines}${nodes}${nodeIds.length ? "" : `<text x="500" y="300" text-anchor="middle" fill="#69787d" font-size="18">${escapeHtml(emptyMessage)}</text>`}`;
+
+  relationGraphList.innerHTML = `<h3>${escapeHtml(listHeading)}</h3><p>${escapeHtml(listNote)}</p>${edges.length
+    ? edges.map(({ relation, detail }) => `<button type="button" data-graph-id="${escapeHtml(relation.subjectId)}" title="${escapeHtml(detail)}"><strong>${escapeHtml(objectById(relation.subjectId)?.label ?? relation.subjectId)}</strong><em>${escapeHtml(relation.predicate)} →</em><strong>${escapeHtml(objectById(relation.objectId)?.label ?? relation.objectId)}</strong>${graphMode === "selected" ? `<small>${escapeHtml(detail)}</small>` : ""}</button>`).join("")
+    : `<div class="graph-empty">${escapeHtml(emptyMessage)}</div>`}`;
+  for (const node of relationGraphSvg.querySelectorAll<SVGGElement>("[data-graph-id]")) {
+    node.addEventListener("click", () => selectGraphObject(node.dataset.graphId));
+    node.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") { event.preventDefault(); selectGraphObject(node.dataset.graphId); }
+    });
+  }
+  for (const button of relationGraphList.querySelectorAll<HTMLButtonElement>("[data-graph-id]")) {
+    button.addEventListener("click", () => selectGraphObject(button.dataset.graphId));
+  }
+}
+
+function selectGraphObject(id: string | undefined): void {
+  if (!id) return;
+  graphMode = "selected";
+  handleSelection(id);
+}
+
+function graphNodeBoundary(from: GraphPoint, to: GraphPoint): GraphPoint {
+  const dx = to.x - from.x;
+  const dy = to.y - from.y;
+  const scale = Math.min(53 / Math.max(Math.abs(dx), 0.001), 16 / Math.max(Math.abs(dy), 0.001));
+  return { x: from.x + dx * scale, y: from.y + dy * scale };
+}
+
+function graphEdgeKind(predicate: string): "direction" | "contact" | "proximity" | "other" {
+  if (["inside", "containing", "touching", "overlapping", "meeting", "on", "in", "by"].includes(predicate)) return "contact";
+  if (["near", "tangible"].includes(predicate)) return "proximity";
+  if (["left", "right", "above", "below", "ahead", "behind", "seen left", "seen right", "in front", "at rear"].includes(predicate)) return "direction";
+  return "other";
+}
+
+function relationLabel(relation: SpatialRelationData): string {
+  return `${objectById(relation.subjectId)?.label ?? relation.subjectId} ${relation.predicate} ${objectById(relation.objectId)?.label ?? relation.objectId}`;
+}
+
 function handleSelection(id: string | null): void {
+  cancelRelationLookup();
   selectedId = id;
+  graphPredicateFilter.value = "all";
   workbench.setSelected(id);
+  if (lastResponse) lastResponse = { ...lastResponse, relations: queryRelations };
+  graphSelectedLoadedId = null;
+  selectedRelationWarnings = [];
   renderInspector();
+  renderRelationGraphIfOpen();
+  if (id && lastResponse) void loadSelectedRelations(id);
+}
+
+function cancelRelationLookup(): void {
+  relationRequest?.abort();
+  relationRequest = null;
+  ++relationRequestSequence;
+}
+
+async function loadSelectedRelations(id: string): Promise<void> {
+  const controller = new AbortController();
+  relationRequest = controller;
+  const sequence = ++relationRequestSequence;
+  const reasoningSequence = requestSequence;
+  try {
+    const response = await relationsForObject(canonicalSceneInputs(objects, initialObjects), id, settings, controller.signal);
+    if (controller.signal.aborted || sequence !== relationRequestSequence || reasoningSequence !== requestSequence || selectedId !== id || !lastResponse) return;
+    // Keep this view independent from the active query's limited relation scope.
+    lastResponse = { ...lastResponse, relations: response.relations };
+    selectedRelationWarnings = response.relationWarnings ?? [];
+    graphSelectedLoadedId = id;
+    renderInspector();
+    renderRelationGraphIfOpen();
+  } catch (error) {
+    if (!controller.signal.aborted) showToast(`Could not load selected-object relations: ${errorMessage(error)}`, true);
+  } finally {
+    if (relationRequest === controller) relationRequest = null;
+  }
 }
 
 function handleObjectChange(changed: SpatialObjectData): void {
-  objects = objects.map((object) => (object.id === changed.id ? changed : object));
+  const changedObjects = changed.id === "table" && committedTable
+    ? [changed, ...carriedTabletopObjects(objects, committedTable, changed)]
+    : [changed];
+  const changedById = new Map(changedObjects.map((object) => [object.id, object]));
+  objects = objects.map((object) => changedById.get(object.id) ?? object);
+  if (changed.id === "table") rememberTablePose();
   selectedId = changed.id;
-  workbench.setObjects(objects);
+  workbench.updateObjects(changedObjects);
   workbench.setSelected(selectedId);
-  if (lastResponse) workbench.setReasoning(lastResponse.resultIds, lastResponse.relations, activePreset()?.focusPredicate ?? "");
+  if (lastResponse) workbench.setReasoning(lastResponse.resultIds, currentProof.relations);
   renderInspector();
+  renderRelationGraphIfOpen();
   scheduleReasoning("Measurement changed");
 }
 
 function scheduleReasoning(label: string): void {
+  cancelRelationLookup();
+  graphSelectedLoadedId = null;
+  selectedRelationWarnings = [];
+  renderRelationGraphIfOpen();
   setReasoningState("pending", label);
   window.clearTimeout(reasonDebounce);
-  reasonDebounce = window.setTimeout(() => void executeReasoning(pipelineInput.value, true), 320);
+  reasonDebounce = window.setTimeout(() => void executeReasoning(pipelineInput.value, true), 180);
 }
 
 function applyInferenceParameters(): void {
@@ -362,6 +763,7 @@ function applyDimension(input: HTMLInputElement): void {
   if (value === selected[dimension]) return;
   const changed = { ...selected, [dimension]: value };
   changed.center = [changed.position[0], changed.position[1] + changed.height / 2, changed.position[2]];
+  if (!workbench.canPlace(changed)) { renderInspector(); return; }
   handleObjectChange(changed);
 }
 
@@ -376,19 +778,26 @@ function renderDimensionControl(dimension: "width" | "height" | "depth", axis: s
 
 function resetScene(): void {
   window.clearTimeout(reasonDebounce);
+  cancelRelationLookup();
   objects = cloneObjects(initialObjects);
+  rememberTablePose();
   selectedId = null;
   lastResponse = null;
+  queryRelations = [];
+  currentProof = { relations: [], referenceIds: [], operation: null };
+  graphSelectedLoadedId = null;
+  selectedRelationWarnings = [];
   workbench.setObjects(objects);
   workbench.setSelected(null);
+  workbench.resetView();
   showToast("Scene reset to its measured baseline");
   renderInspector();
+  renderRelationGraphIfOpen();
   void executeReasoning(pipelineInput.value);
 }
 
 function activePreset(): Preset | undefined {
-  return presets.find((preset) => preset.id === activePresetId && preset.pipeline === pipelineInput.value) ??
-    presets.find((preset) => preset.id === activePresetId);
+  return [...presets, ...savedPipelines].find((preset) => preset.id === activePresetId && preset.pipeline === pipelineInput.value);
 }
 
 function objectById(id: string): SpatialObjectData | undefined {
@@ -445,6 +854,11 @@ function cloneObjects(value: SpatialObjectData[]): SpatialObjectData[] {
   return value.map((object) => ({ ...object, position: [...object.position] as [number, number, number] }));
 }
 
+function rememberTablePose(): void {
+  const table = objects.find((object) => object.id === "table");
+  committedTable = table ? { ...table, position: [...table.position] } : null;
+}
+
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "Unexpected reasoning error";
 }
@@ -457,8 +871,8 @@ function escapeHtml(value: string): string {
   return value.replace(/[&<>'"]/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" })[character] ?? character);
 }
 
-function element<T extends HTMLElement>(id: string): T {
+function element<T extends Element>(id: string): T {
   const found = document.getElementById(id);
   if (!found) throw new Error(`Missing required element #${id}`);
-  return found as T;
+  return found as unknown as T;
 }

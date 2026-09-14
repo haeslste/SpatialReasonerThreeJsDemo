@@ -42,6 +42,12 @@ export interface SpatialRelationData {
   yaw: number;
 }
 
+export interface RelationWarningData {
+  subjectId: string;
+  referenceId: string;
+  category: "similarity";
+}
+
 export interface TraceStage {
   operation: string;
   inputIds: string[];
@@ -55,9 +61,19 @@ export interface ReasonResponse {
   resultIds: string[];
   objects: SpatialObjectData[];
   relations: SpatialRelationData[];
+  relationScopeIds: string[];
+  relationWarnings?: RelationWarningData[];
   trace: TraceStage[];
   timingMs: number;
   error: string | null;
+}
+
+export interface RelationsResponse {
+  success: boolean;
+  objectId: string;
+  relations: SpatialRelationData[];
+  relationWarnings?: RelationWarningData[];
+  timingMs: number;
 }
 
 export interface SceneResponse {

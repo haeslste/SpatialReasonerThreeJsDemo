@@ -1,11 +1,15 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
+import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { CSS2DObject, CSS2DRenderer } from "three/examples/jsm/renderers/CSS2DRenderer.js";
 
 import type { SpatialObjectData, SpatialRelationData } from "../types";
+import { firstObserverObstacle, observerMoveGoal, sweepMove, withinSupport } from "./collision";
+import { objectVisualPolicy } from "./visualState";
 
 type ObjectChangeHandler = (object: SpatialObjectData) => void;
 type SelectionHandler = (id: string | null) => void;
+type ConstraintHandler = (message: string) => void;
 
 const CYAN = 0x43d3df;
 const BLUE = 0x73a9ff;
@@ -26,6 +30,32 @@ const DIRECTIONAL = new Set([
   "at rear",
 ]);
 const CONTACT = new Set(["inside", "containing", "touching", "overlapping", "meeting", "on", "in", "by"]);
+const OPEN_ASSETS: Record<string, string> = {
+  table: "table.glb",
+  laptop: "laptop.glb",
+  book: "books.glb",
+  lamp: "lampRoundTable.glb",
+  package: "cardboardBoxClosed.glb",
+  wall: "wall.glb",
+  wallWindow: "wallWindow.glb",
+  sofa: "loungeSofa.glb",
+  coffeeTable: "tableCoffee.glb",
+  tvCabinet: "cabinetTelevision.glb",
+  plant: "pottedPlant.glb",
+  diningTable: "tableRound.glb",
+  chair: "chair.glb",
+  kitchenBar: "kitchenBar.glb",
+  fridge: "kitchenFridge.glb",
+  stove: "kitchenStove.glb",
+  kitchenSink: "kitchenSink.glb",
+  bed: "bedDouble.glb",
+  sideTable: "sideTableDrawers.glb",
+  wardrobe: "bookcaseClosed.glb",
+  bookcase: "bookcaseOpen.glb",
+  bathtub: "bathtub.glb",
+  toilet: "toilet.glb",
+  bathSink: "bathroomSink.glb",
+};
 
 export class WorkbenchScene {
   private readonly scene = new THREE.Scene();
@@ -39,27 +69,32 @@ export class WorkbenchScene {
   private readonly dragOffset = new THREE.Vector3();
   private readonly objectRoots = new Map<string, THREE.Group>();
   private readonly objects = new Map<string, SpatialObjectData>();
+  private readonly assetScenes = new Map<string, Promise<THREE.Group>>();
+  private readonly gltfLoader = new GLTFLoader();
   private readonly overlays = new THREE.Group();
+  private readonly flatDetails = new THREE.Group();
   private readonly resizeObserver: ResizeObserver;
   private animationFrame = 0;
+  private framedFlat = false;
   private selectedId: string | null = null;
   private resultIds = new Set<string>();
   private activeRelations: SpatialRelationData[] = [];
-  private focusPredicate = "";
   private showBoundingBoxes = false;
   private showNearField = true;
   private draggingId: string | null = null;
   private dragMoved = false;
+  private dragBlocked = false;
 
   constructor(
     private readonly mount: HTMLElement,
     private readonly onSelection: SelectionHandler,
     private readonly onObjectChange: ObjectChangeHandler,
+    private readonly onConstraint: ConstraintHandler,
   ) {
     this.scene.background = new THREE.Color(SLATE);
-    this.scene.fog = new THREE.Fog(0x222b35, 9, 18);
-    this.camera.position.set(4.25, 3.45, 5.4);
-    this.camera.lookAt(0, 0.55, -0.35);
+    this.scene.fog = new THREE.Fog(0x222b35, 18, 42);
+    this.camera.position.set(10.2, 10.6, 11.8);
+    this.camera.lookAt(0, 0.4, 0);
 
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     this.renderer.shadowMap.enabled = true;
@@ -77,16 +112,19 @@ export class WorkbenchScene {
     this.controls = new OrbitControls(this.camera, this.renderer.domElement);
     this.controls.enableDamping = true;
     this.controls.dampingFactor = 0.07;
-    this.controls.target.set(0, 0.62, -0.35);
-    this.controls.minDistance = 2.4;
-    this.controls.maxDistance = 12;
+    this.controls.target.set(0, 0.4, 0);
+    this.controls.minDistance = 1.8;
+    this.controls.maxDistance = 30;
     this.controls.maxPolarAngle = Math.PI * 0.48;
     this.controls.mouseButtons.LEFT = THREE.MOUSE.ROTATE;
     this.controls.mouseButtons.RIGHT = THREE.MOUSE.PAN;
 
     this.overlays.name = "reasoning-overlays";
     this.scene.add(this.overlays);
+    this.flatDetails.name = "visual-only-room-finishes";
+    this.scene.add(this.flatDetails);
     this.addLighting();
+    this.addFlatDetails();
 
     this.resizeObserver = new ResizeObserver(() => this.resize());
     this.resizeObserver.observe(this.mount);
@@ -115,33 +153,102 @@ export class WorkbenchScene {
     this.objectRoots.clear();
     this.objects.clear();
 
-    for (const object of objects) {
-      this.objects.set(object.id, object);
-      const root = this.createObject(object);
-      root.name = object.id;
-      root.userData.objectId = object.id;
-      root.position.set(-object.position[0], object.position[1], object.position[2]);
-      root.rotation.y = object.angle;
-      root.traverse((child) => {
-        child.userData.objectId = object.id;
-      });
-      this.objectRoots.set(object.id, root);
-      this.scene.add(root);
-    }
+    for (const object of objects) this.mountObject(object);
     if (this.selectedId && !this.objects.has(this.selectedId)) this.selectedId = null;
     this.refreshVisualState();
   }
 
-  setReasoning(resultIds: string[], relations: SpatialRelationData[], focusPredicate: string): void {
+  updateObject(object: SpatialObjectData): void {
+    this.updateObjects([object]);
+  }
+
+  updateObjects(objects: SpatialObjectData[]): void {
+    for (const object of objects) {
+      const previous = this.objectRoots.get(object.id);
+      if (previous) {
+        this.disposeTree(previous);
+        previous.removeFromParent();
+      }
+      this.mountObject(object);
+    }
+    this.refreshVisualState();
+  }
+
+  updateReasoningData(objects: SpatialObjectData[]): void {
+    if (objects.length !== this.objects.size || objects.some((object) => !this.objects.has(object.id))) {
+      this.setObjects(objects);
+      return;
+    }
+    for (const object of objects) this.objects.set(object.id, object);
+    this.refreshVisualState();
+  }
+
+  private mountObject(object: SpatialObjectData): void {
+    this.objects.set(object.id, object);
+    const root = this.createObject(object);
+    root.name = object.id;
+    root.userData.objectId = object.id;
+    root.position.set(-object.position[0], object.position[1], object.position[2]);
+    root.rotation.y = object.angle;
+    root.traverse((child) => { child.userData.objectId = object.id; });
+    this.objectRoots.set(object.id, root);
+    this.scene.add(root);
+  }
+
+  setReasoning(resultIds: string[], relations: SpatialRelationData[]): void {
     this.resultIds = new Set(resultIds);
     this.activeRelations = relations;
-    this.focusPredicate = focusPredicate;
     this.refreshVisualState();
   }
 
   setSelected(id: string | null): void {
     this.selectedId = id;
     this.refreshVisualState();
+  }
+
+  focusObserver(): void {
+    const observer = this.objects.get("observer");
+    if (!observer) return;
+    this.setSelected("observer");
+    this.onSelection("observer");
+    const target = this.worldCenter(observer);
+    target.y = 0.65;
+    const shift = target.sub(this.controls.target);
+    this.controls.target.add(shift);
+    this.camera.position.add(shift);
+    this.controls.update();
+  }
+
+  resetView(): void {
+    this.controls.target.set(0, 0.4, 0);
+    this.camera.position.set(10.2, 10.6, 11.8);
+    this.framedFlat = false;
+    this.resize();
+    this.controls.update();
+  }
+
+  walkObserver(forward: number, strafe: number, step: number): void {
+    if (this.selectedId !== "observer") return;
+    const observer = this.objects.get("observer");
+    const root = this.objectRoots.get("observer");
+    if (!observer || !root) return;
+    const goal = observerMoveGoal(observer.position, observer.angle, forward, strafe, step);
+    let next = sweepMove(observer, goal, this.objects.values());
+    if (Math.hypot(next[0] - observer.position[0], next[2] - observer.position[2]) < step * 0.25) {
+      const alongX = sweepMove(observer, [goal[0], goal[1], observer.position[2]], this.objects.values());
+      const alongZ = sweepMove(observer, [observer.position[0], goal[1], goal[2]], this.objects.values());
+      next = Math.abs(alongX[0] - observer.position[0]) > Math.abs(alongZ[2] - observer.position[2]) ? alongX : alongZ;
+    }
+    const dx = next[0] - observer.position[0];
+    const dz = next[2] - observer.position[2];
+    if (Math.hypot(dx, dz) < 1e-5) return;
+    observer.position = next;
+    observer.center = [next[0], next[1] + observer.height / 2, next[2]];
+    root.position.set(-next[0], next[1], next[2]);
+    const pan = new THREE.Vector3(-dx, 0, dz);
+    this.controls.target.add(pan);
+    this.camera.position.add(pan);
+    this.onObjectChange({ ...observer, position: [...next] });
   }
 
   setShowBoundingBoxes(show: boolean): void {
@@ -159,7 +266,9 @@ export class WorkbenchScene {
     const object = this.objects.get(this.selectedId);
     const root = this.objectRoots.get(this.selectedId);
     if (!object || !root || object.immobile) return;
-    object.angle = normalizeAngle(object.angle + deltaRadians);
+    const angle = normalizeAngle(object.angle + deltaRadians);
+    if (!this.canPlace({ ...object, angle })) return;
+    object.angle = angle;
     object.yaw = (object.angle * 180) / Math.PI;
     root.rotation.y = object.angle;
     this.onObjectChange({ ...object, position: [...object.position] as [number, number, number] });
@@ -171,7 +280,9 @@ export class WorkbenchScene {
     const object = this.objects.get(this.selectedId);
     const root = this.objectRoots.get(this.selectedId);
     if (!object || !root || object.immobile) return;
-    object.angle = normalizeAngle(angle);
+    const nextAngle = normalizeAngle(angle);
+    if (!this.canPlace({ ...object, angle: nextAngle })) return;
+    object.angle = nextAngle;
     object.yaw = (object.angle * 180) / Math.PI;
     root.rotation.y = object.angle;
     this.onObjectChange({ ...object, position: [...object.position] as [number, number, number] });
@@ -182,7 +293,6 @@ export class WorkbenchScene {
     this.selectedId = relation.subjectId;
     this.resultIds = new Set([relation.subjectId, relation.objectId]);
     this.activeRelations = [relation];
-    this.focusPredicate = relation.predicate;
     this.refreshVisualState();
     const subject = this.objectRoots.get(relation.subjectId);
     const object = this.objectRoots.get(relation.objectId);
@@ -194,22 +304,68 @@ export class WorkbenchScene {
     this.onSelection(relation.subjectId);
   }
 
+  canPlace(candidate: SpatialObjectData): boolean {
+    if (!withinSupport(candidate, this.objects.values())) {
+      this.onConstraint("The measured box must stay on its supporting surface.");
+      return false;
+    }
+    const obstacle = firstObserverObstacle(candidate, this.objects.values());
+    if (obstacle) {
+      this.onConstraint(`The observer cannot pass through ${obstacle.label.toLowerCase()}.`);
+      return false;
+    }
+    return true;
+  }
+
   private addLighting(): void {
     const hemi = new THREE.HemisphereLight(0xeaf4f2, 0x29323c, 2.1);
     this.scene.add(hemi);
     const key = new THREE.DirectionalLight(0xfff1dc, 3.6);
-    key.position.set(2.5, 6.5, 4.5);
+    key.position.set(3.5, 9, 6);
     key.castShadow = true;
     key.shadow.mapSize.set(2048, 2048);
-    key.shadow.camera.left = -5;
-    key.shadow.camera.right = 5;
-    key.shadow.camera.top = 5;
-    key.shadow.camera.bottom = -5;
+    key.shadow.camera.left = -10;
+    key.shadow.camera.right = 10;
+    key.shadow.camera.top = 10;
+    key.shadow.camera.bottom = -10;
     key.shadow.bias = -0.0005;
     this.scene.add(key);
     const fill = new THREE.DirectionalLight(0x88bac8, 1.2);
-    fill.position.set(-4, 3, -3);
+    fill.position.set(-7, 5, -5);
     this.scene.add(fill);
+  }
+
+  private addFlatDetails(): void {
+    // Room finishes and names are visual guides, not measured SRpy objects.
+    const rooms = [
+      { name: "BEDROOM", x: -4, z: -2.14, width: 4.6, depth: 4.68, color: 0x73827d, labelZ: -0.65 },
+      { name: "STUDY", x: 0.25, z: -2.14, width: 3.9, depth: 4.68, color: 0x8c795e, labelZ: -0.65 },
+      { name: "BATHROOM", x: 4.25, z: -2.14, width: 4.1, depth: 4.68, color: 0x7895a0, labelZ: -0.65 },
+      { name: "LIVING", x: -3, z: 2.41, width: 6.6, depth: 4.26, color: 0x907a69, labelZ: 3.85 },
+      { name: "KITCHEN / DINING", x: 3.3, z: 2.41, width: 6, depth: 4.26, color: 0x718b8b, labelZ: 3.85 },
+    ];
+    for (const room of rooms) {
+      const finish = new THREE.Mesh(
+        new THREE.BoxGeometry(room.width - 0.12, 0.012, room.depth - 0.12),
+        new THREE.MeshStandardMaterial({ color: room.color, roughness: 0.95, transparent: true, opacity: 0.76 }),
+      );
+      finish.position.set(-room.x, 0.006, room.z);
+      finish.receiveShadow = true;
+      this.flatDetails.add(finish);
+
+      const element = document.createElement("div");
+      element.className = "room-label";
+      element.textContent = room.name;
+      const label = new CSS2DObject(element);
+      label.position.set(-room.x, 0.06, room.labelZ);
+      this.flatDetails.add(label);
+    }
+    for (const x of [-3.9, 0, 4.15]) {
+      const doorway = new THREE.Group();
+      doorway.position.set(-x, 0, 0.22);
+      this.flatDetails.add(doorway);
+      void this.loadDoorway(doorway);
+    }
   }
 
   private createObject(object: SpatialObjectData): THREE.Group {
@@ -244,13 +400,90 @@ export class WorkbenchScene {
         this.makeBox(root, object.width, object.height, object.depth, color, object.height / 2, 0.45);
         break;
       case "wall":
+      case "wallWindow":
         this.makeBox(root, object.width, object.height, object.depth, color, object.height / 2, 0.22);
         break;
       default:
         this.makeBox(root, object.width, object.height, object.depth, color, object.height / 2);
     }
-    if (!new Set(["floor", "wall"]).has(object.visualKind ?? "")) this.addLabel(root, object);
+    if (!new Set(["floor", "wall", "wallWindow"]).has(object.visualKind ?? "")) this.addLabel(root, object);
+    const asset = OPEN_ASSETS[object.visualKind ?? ""];
+    if (asset) void this.loadAsset(root, object, color, asset);
     return root;
+  }
+
+  private async loadAsset(root: THREE.Group, object: SpatialObjectData, color: THREE.Color, asset: string): Promise<void> {
+    try {
+      const source = await this.getAssetScene(asset);
+      if (this.objectRoots.get(object.id) !== root) return;
+      const model = this.fitAsset(source, object.width, object.height, object.depth);
+      model.traverse((child) => {
+        child.userData.objectId = object.id;
+        if (child instanceof THREE.Mesh) {
+          child.geometry = child.geometry.clone();
+          const original = Array.isArray(child.material) ? child.material : [child.material];
+          const materials = original.map((entry) => {
+            const material = entry instanceof THREE.MeshStandardMaterial ? entry.clone() : this.material(color, 1, 0.68);
+            material.userData.baseOpacity = material.opacity;
+            material.userData.baseColor = material.color.getHex();
+            return material;
+          });
+          child.material = Array.isArray(child.material) ? materials : materials[0];
+          child.castShadow = true;
+          child.receiveShadow = true;
+        }
+      });
+      for (const child of [...root.children]) {
+        if (child instanceof THREE.Mesh) {
+          this.disposeTree(child);
+          root.remove(child);
+        }
+      }
+      root.add(model);
+      this.refreshVisualState();
+    } catch {
+      // The measured procedural object remains available if a bundled asset fails.
+      this.assetScenes.delete(asset);
+    }
+  }
+
+  private getAssetScene(asset: string): Promise<THREE.Group> {
+    let pending = this.assetScenes.get(asset);
+    if (!pending) {
+      pending = this.gltfLoader.loadAsync(`/models/kenney/${asset}`).then((gltf) => gltf.scene);
+      this.assetScenes.set(asset, pending);
+    }
+    return pending;
+  }
+
+  private fitAsset(source: THREE.Group, width: number, height: number, depth: number): THREE.Group {
+    const model = source.clone(true);
+    const size = new THREE.Box3().setFromObject(model).getSize(new THREE.Vector3());
+    if (size.x <= 0 || size.y <= 0 || size.z <= 0) throw new Error("Empty Kenney model");
+    model.scale.set(width / size.x, height / size.y, depth / size.z);
+    const scaled = new THREE.Box3().setFromObject(model);
+    model.position.set(-(scaled.min.x + scaled.max.x) / 2, -scaled.min.y, -(scaled.min.z + scaled.max.z) / 2);
+    return model;
+  }
+
+  private async loadDoorway(root: THREE.Group): Promise<void> {
+    try {
+      const source = await this.getAssetScene("wallDoorwayWide.glb");
+      const doorway = this.fitAsset(source, 1.4, 1.6, 0.16);
+      doorway.traverse((child) => {
+        if (child instanceof THREE.Mesh) {
+          child.geometry = child.geometry.clone();
+          child.material = Array.isArray(child.material)
+            ? child.material.map((material) => material.clone())
+            : child.material.clone();
+          child.castShadow = true;
+          child.receiveShadow = true;
+        }
+      });
+      root.add(doorway);
+    } catch {
+      this.assetScenes.delete("wallDoorwayWide.glb");
+    }
   }
 
   private material(color: THREE.Color, opacity = 1, roughness = 0.62, metalness = 0.04): THREE.MeshStandardMaterial {
@@ -415,26 +648,33 @@ export class WorkbenchScene {
     this.clearOverlays();
     const hasResults = this.resultIds.size > 0;
     for (const [id, root] of this.objectRoots) {
+      const object = this.objects.get(id);
       const isResult = this.resultIds.has(id);
       const isSelected = id === this.selectedId;
+      const isArchitecture = object?.visualKind === "floor" || object?.visualKind === "wall" || object?.visualKind === "wallWindow";
       root.traverse((child) => {
         if (!(child instanceof THREE.Mesh)) return;
         const materials = Array.isArray(child.material) ? child.material : [child.material];
+        let castShadow = false;
         for (const base of materials) {
           if (!(base instanceof THREE.MeshStandardMaterial)) continue;
           const material = base;
           const baseOpacity = Number(material.userData.baseOpacity ?? 1);
-          material.transparent = hasResults && !isResult ? true : baseOpacity < 1;
-          material.opacity = hasResults && !isResult && !isSelected ? Math.min(baseOpacity, 0.12) : baseOpacity;
+          const policy = objectVisualPolicy(baseOpacity, hasResults, isResult, isSelected, isArchitecture);
+          material.transparent = policy.transparent;
+          material.opacity = policy.opacity;
           material.emissive.setHex(isResult ? CYAN : isSelected ? AMBER : 0x000000);
           material.emissiveIntensity = isResult ? 0.72 : isSelected ? 0.22 : 0;
-          material.depthWrite = material.opacity > 0.5;
+          material.depthWrite = policy.depthWrite;
+          castShadow ||= policy.castShadow;
         }
+        child.castShadow = castShadow;
       });
       for (const label of root.children.filter((child) => child instanceof CSS2DObject) as CSS2DObject[]) {
         label.element.classList.toggle("is-result", isResult);
         label.element.classList.toggle("is-dimmed", hasResults && !isResult && !isSelected);
         label.element.classList.toggle("is-selected", isSelected);
+        label.element.classList.toggle("is-context", object?.supertype === "Furniture" && id !== "table" && !isResult && !isSelected);
       }
       if (this.showBoundingBoxes && !isResult && !isSelected) this.addBoxOverlay(id, 0xb6c0c5, 0.18);
       if (isResult) {
@@ -506,34 +746,17 @@ export class WorkbenchScene {
   }
 
   private addRelationOverlays(): void {
-    const resultRelations = this.activeRelations
-      .filter((relation) => this.resultIds.has(relation.subjectId) || this.resultIds.has(relation.objectId))
-      .sort((a, b) => Number(this.relationMatchesFocus(b)) - Number(this.relationMatchesFocus(a)));
-    const chosen: SpatialRelationData[] = [];
-    for (const relation of resultRelations) {
-      if (!this.relationMatchesFocus(relation) && chosen.length >= 3) continue;
-      if (!DIRECTIONAL.has(relation.predicate) && relation.predicate !== "near" && !CONTACT.has(relation.predicate)) continue;
-      if (chosen.some((item) => item.subjectId === relation.subjectId && item.objectId === relation.objectId && item.predicate === relation.predicate)) continue;
-      chosen.push(relation);
-      if (chosen.length >= 7) break;
-    }
-
-    for (const relation of chosen) {
+    const contactShown = new Set<string>();
+    for (const relation of this.activeRelations) {
       if (DIRECTIONAL.has(relation.predicate)) this.addDirectionalCurve(relation);
       if (relation.predicate === "near") this.addNearRing(relation);
       if (CONTACT.has(relation.predicate)) {
-        this.addBoxOverlay(relation.subjectId, AMBER, 0.75);
-        this.addBoxOverlay(relation.objectId, AMBER, 0.5);
+        if (!contactShown.has(relation.subjectId)) this.addBoxOverlay(relation.subjectId, AMBER, 0.75);
+        if (!contactShown.has(relation.objectId)) this.addBoxOverlay(relation.objectId, AMBER, 0.5);
+        contactShown.add(relation.subjectId);
+        contactShown.add(relation.objectId);
       }
     }
-  }
-
-  private relationMatchesFocus(relation: SpatialRelationData): boolean {
-    const normalized = this.focusPredicate.replace("seenleft", "seen left").replace("seenright", "seen right");
-    if (!normalized) return false;
-    if (normalized.includes("left") && relation.predicate.includes("left")) return true;
-    if (normalized.includes("right") && relation.predicate.includes("right")) return true;
-    return relation.predicate === normalized;
   }
 
   private addDirectionalCurve(relation: SpatialRelationData): void {
@@ -643,6 +866,7 @@ export class WorkbenchScene {
     if (!object || !root || object.immobile || event.shiftKey) return;
     this.draggingId = id;
     this.dragMoved = false;
+    this.dragBlocked = false;
     this.dragPlane.set(new THREE.Vector3(0, 1, 0), -object.position[1]);
     const intersection = new THREE.Vector3();
     if (this.raycaster.ray.intersectPlane(this.dragPlane, intersection)) this.dragOffset.copy(root.position).sub(intersection);
@@ -660,18 +884,15 @@ export class WorkbenchScene {
     const intersection = new THREE.Vector3();
     if (!this.raycaster.ray.intersectPlane(this.dragPlane, intersection)) return;
     const proposed = intersection.add(this.dragOffset);
-    if (object.position[1] > 0.5) {
-      proposed.x = THREE.MathUtils.clamp(proposed.x, -1.48, 1.48);
-      proposed.z = THREE.MathUtils.clamp(proposed.z, -1.0, 0.48);
-    } else {
-      proposed.x = THREE.MathUtils.clamp(proposed.x, -2.9, 2.9);
-      proposed.z = THREE.MathUtils.clamp(proposed.z, -2.15, 2.25);
-    }
-    root.position.x = proposed.x;
-    root.position.z = proposed.z;
-    object.position[0] = -proposed.x;
-    object.position[2] = proposed.z;
-    object.center = [-proposed.x, object.position[1] + object.height / 2, proposed.z];
+    const goal: [number, number, number] = [-proposed.x, object.position[1], proposed.z];
+    const next = sweepMove(object, goal, this.objects.values());
+    if (Math.abs(next[0] - goal[0]) > 0.001 || Math.abs(next[2] - goal[2]) > 0.001) this.dragBlocked = true;
+    if (Math.abs(next[0] - object.position[0]) < 1e-6 && Math.abs(next[2] - object.position[2]) < 1e-6) return;
+    root.position.x = -next[0];
+    root.position.z = next[2];
+    object.position[0] = next[0];
+    object.position[2] = next[2];
+    object.center = [next[0], object.position[1] + object.height / 2, next[2]];
     this.dragMoved = true;
     this.refreshVisualState();
   };
@@ -687,6 +908,7 @@ export class WorkbenchScene {
       const object = this.objects.get(id);
       if (object) this.onObjectChange({ ...object, position: [...object.position] as [number, number, number] });
     }
+    if (this.dragBlocked) this.onConstraint(id === "observer" ? "Observer stopped at a wall, furnishing, or flat boundary." : "Object reached the edge of its supporting surface.");
   };
 
   private readonly handleDoubleClick = (event: MouseEvent): void => {
@@ -699,14 +921,30 @@ export class WorkbenchScene {
 
   private readonly handleKeyDown = (event: KeyboardEvent): void => {
     const target = event.target as HTMLElement | null;
-    if (target?.matches("input, textarea")) return;
-    if (event.key.toLowerCase() === "q") this.rotateSelected(THREE.MathUtils.degToRad(15));
-    if (event.key.toLowerCase() === "e") this.rotateSelected(THREE.MathUtils.degToRad(-15));
+    if (target?.matches("input, textarea, select, [contenteditable='true']")) return;
+    const key = event.key.toLowerCase();
+    if (key === "q") this.rotateSelected(THREE.MathUtils.degToRad(15));
+    if (key === "e") this.rotateSelected(THREE.MathUtils.degToRad(-15));
+    if (this.selectedId === "observer" && ["w", "a", "s", "d", "arrowup", "arrowleft", "arrowdown", "arrowright"].includes(key)) {
+      event.preventDefault();
+      const step = event.shiftKey ? 0.25 : 0.16;
+      if (key === "w" || key === "arrowup") this.walkObserver(1, 0, step);
+      if (key === "s" || key === "arrowdown") this.walkObserver(-1, 0, step);
+      if (key === "a" || key === "arrowleft") this.walkObserver(0, -1, step);
+      if (key === "d" || key === "arrowright") this.walkObserver(0, 1, step);
+    }
   };
 
   private resize(): void {
     const width = Math.max(1, this.mount.clientWidth);
     const height = Math.max(1, this.mount.clientHeight);
+    if (!this.framedFlat && width > 10 && height > 10) {
+      const aspect = width / height;
+      const distance = Math.min(30, Math.max(18, 18 * 1.2 / aspect));
+      const direction = this.camera.position.clone().sub(this.controls.target).normalize();
+      this.camera.position.copy(this.controls.target).addScaledVector(direction, distance);
+      this.framedFlat = true;
+    }
     this.camera.aspect = width / height;
     this.camera.updateProjectionMatrix();
     this.renderer.setSize(width, height, false);

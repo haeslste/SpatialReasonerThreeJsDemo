@@ -48,6 +48,7 @@ class ReasonRequest(BaseModel):
     objects: List[SpatialObjectInput] = Field(min_length=2, max_length=48)
     pipeline: str = Field(min_length=1, max_length=800)
     settings: ReasonSettings = Field(default_factory=ReasonSettings)
+    focusObjectId: Optional[str] = Field(default=None, min_length=1, max_length=64, pattern=r"^[A-Za-z0-9:_-]+$")
 
     @field_validator("objects")
     @classmethod
@@ -73,6 +74,12 @@ class RelationOutput(BaseModel):
     yaw: float
 
 
+class RelationWarningOutput(BaseModel):
+    subjectId: str
+    referenceId: str
+    category: Literal["similarity"]
+
+
 class TraceOutput(BaseModel):
     operation: str
     inputIds: List[str]
@@ -86,6 +93,8 @@ class ReasonResponse(BaseModel):
     resultIds: List[str]
     objects: List[Dict[str, Any]]
     relations: List[RelationOutput]
+    relationScopeIds: List[str] = Field(default_factory=list)
+    relationWarnings: List[RelationWarningOutput] = Field(default_factory=list)
     trace: List[TraceOutput]
     timingMs: float
     error: Optional[str] = None
@@ -101,4 +110,5 @@ class RelationsResponse(BaseModel):
     success: bool
     objectId: str
     relations: List[RelationOutput]
+    relationWarnings: List[RelationWarningOutput] = Field(default_factory=list)
     timingMs: float

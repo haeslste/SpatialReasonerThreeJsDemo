@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import time
-from typing import Any, Dict, Iterable, List, Optional, Sequence
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from spatial_reasoner import NearbySchema, SectorSchema, SpatialObject, SpatialReasoner
 
@@ -9,6 +9,7 @@ from .models import (
     ReasonRequest,
     ReasonResponse,
     RelationOutput,
+    RelationWarningOutput,
     RelationsRequest,
     RelationsResponse,
     TraceOutput,
@@ -46,19 +47,69 @@ def _relation_output(relation: Any) -> RelationOutput:
     )
 
 
-def _all_relations(reasoner: SpatialReasoner, only_id: Optional[str] = None) -> List[RelationOutput]:
-    output: List[RelationOutput] = []
-    seen = set()
-    for index, obj in enumerate(reasoner.objects):
-        if only_id is not None and obj.id != only_id:
+def _relations_of_compatible(reasoner: SpatialReasoner, index: int) -> Tuple[List[Any], List[RelationWarningOutput]]:
+    try:
+        return reasoner.relations_of(index), []
+    except AttributeError as exc:
+        if "sameperimeter" not in str(exc):
+            raise
+
+    # SRpy 0.1.0 references SpatialPredicate.sameperimeter in similarities(),
+    # but the enum does not define it. Retry only the affected subject pairs
+    # without similarity; retain all other predicates rather than fabricating
+    # a replacement relation or failing the entire graph request.
+    reference = reasoner.objects[index]
+    relations: List[Any] = []
+    warnings: List[RelationWarningOutput] = []
+    for subject in reasoner.objects:
+        if subject == reference:
             continue
-        for relation in reasoner.relations_of(index):
+        try:
+            relations.extend(reference.relate(subject=subject))
+        except AttributeError as exc:
+            if "sameperimeter" not in str(exc) or not reference.context or not reference.context.deduce.similarity:
+                raise
+            deduction = reference.context.deduce
+            similarity_enabled = deduction.similarity
+            deduction.similarity = False
+            try:
+                relations.extend(reference.relate(subject=subject))
+            finally:
+                deduction.similarity = similarity_enabled
+            warnings.append(RelationWarningOutput(subjectId=subject.id, referenceId=reference.id, category="similarity"))
+    return relations, warnings
+
+
+def _all_relations(reasoner: SpatialReasoner, only_ids: Optional[Iterable[str]] = None) -> Tuple[List[RelationOutput], List[RelationWarningOutput]]:
+    output: List[RelationOutput] = []
+    warnings: List[RelationWarningOutput] = []
+    seen = set()
+    allowed_ids = set(only_ids) if only_ids is not None else None
+    for index, obj in enumerate(reasoner.objects):
+        if allowed_ids is not None and obj.id not in allowed_ids:
+            continue
+        raw_relations, skipped = _relations_of_compatible(reasoner, index)
+        warnings.extend(skipped)
+        for relation in raw_relations:
             key = (relation.subject_id, relation.predicate.value, relation.object_id)
             if key not in seen:
                 seen.add(key)
                 output.append(_relation_output(relation))
     output.sort(key=lambda item: (item.objectId, item.subjectId, item.predicate))
-    return output
+    return output, warnings
+
+
+def _relation_scope_ids(trace: Sequence[TraceOutput], result_ids: Sequence[str], focus_id: Optional[str], object_ids: Sequence[str]) -> List[str]:
+    scope: List[str] = []
+    for index, stage in enumerate(trace):
+        if stage.operation.startswith("pick(") and index > 0 and len(trace[index - 1].outputIds) == 1:
+            scope.append(trace[index - 1].outputIds[0])
+            break
+    if not scope and result_ids:
+        scope.append(result_ids[0])
+    if focus_id in object_ids and focus_id not in scope:
+        scope.append(focus_id)
+    return scope
 
 
 def _ids(indices: Iterable[int], object_ids: Sequence[str]) -> List[str]:
@@ -127,17 +178,22 @@ def reason_scene(request: ReasonRequest) -> ReasonResponse:
     result_ids = [obj.id for obj in reasoner.result()]
     trace = _trace(reasoner, operations, original_ids)
     failed = next((step.error for step in trace if step.error), None)
+    relation_scope_ids = _relation_scope_ids(trace, result_ids, request.focusObjectId, original_ids)
 
     # SpatialReasoner.run() syncs its fact base back to objects. Reload to restore
-    # object contexts before collecting authoritative pairwise relations.
+    # object contexts before collecting authoritative relations. A 42-object
+    # global enumeration exceeds 8,000 relations; send only the query reference
+    # and selected object's proofs. Other objects are available on demand.
     reasoner.load(reasoner.objects)
-    relations = _all_relations(reasoner)
+    relations, relation_warnings = _all_relations(reasoner, relation_scope_ids)
     elapsed = (time.perf_counter() - started) * 1000.0
     return ReasonResponse(
         success=failed is None,
         resultIds=result_ids if failed is None else [],
         objects=_serialized_objects(reasoner),
         relations=relations,
+        relationScopeIds=relation_scope_ids,
+        relationWarnings=relation_warnings,
         trace=trace,
         timingMs=round(elapsed, 3),
         error=failed,
@@ -150,10 +206,11 @@ def relations_for_object(request: RelationsRequest) -> RelationsResponse:
     reasoner.deduce_categories("topology connectivity comparability similarity visibility")
     if reasoner.index_of_id(request.objectId) is None:
         raise ValueError(f"Unknown object ID: {request.objectId}")
-    relations = _all_relations(reasoner, only_id=request.objectId)
+    relations, relation_warnings = _all_relations(reasoner, only_ids=[request.objectId])
     return RelationsResponse(
         success=True,
         objectId=request.objectId,
         relations=relations,
+        relationWarnings=relation_warnings,
         timingMs=round((time.perf_counter() - started) * 1000.0, 3),
     )

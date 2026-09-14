@@ -34,16 +34,20 @@
           <div id="sceneMount" class="scene-mount"></div>
           <div class="viewport-head">
             <div>
-              <div class="viewport-kicker">SCENE 01 · OBJECT-CENTRIC REFERENCE SYSTEM</div>
-              <h2>Tabletop grounding study</h2>
+              <div class="viewport-kicker">SCENE 01 · WALKABLE SINGLE-FLOOR FLAT</div>
+              <h2>Domestic spatial study</h2>
             </div>
             <div id="reasoningBadge" class="reasoning-badge"><span></span> Ready</div>
           </div>
           <div class="scene-toolbar" aria-label="Object controls">
-            <button id="rotateLeftButton" type="button" title="Rotate selected object left (Q)">↶ <span>15°</span></button>
-            <button id="rotateRightButton" type="button" title="Rotate selected object right (E)">↷ <span>15°</span></button>
+            <button id="exploreButton" type="button" title="Select and focus the observer; use WASD or arrow keys to walk">◎ <span>Explore flat</span></button>
             <span class="toolbar-divider"></span>
-            <span class="toolbar-hint">Drag to move · Q/E to rotate · Shift + drag to pan</span>
+            <button id="rotateLeftButton" type="button" title="Rotate selected object 15° left around Y (Q)">↶ <span>Y · 15°</span></button>
+            <button id="rotateRightButton" type="button" title="Rotate selected object 15° right around Y (E)">↷ <span>Y · 15°</span></button>
+            <span class="toolbar-divider"></span>
+            <button id="relationGraphButton" type="button" title="Open the object relation graph">◇ <span>Relation graph</span></button>
+            <span class="toolbar-divider"></span>
+            <span class="toolbar-hint">Select observer · WASD to walk · drag furniture · Q/E or inspector to rotate around Y</span>
           </div>
           <details id="modelControls" class="model-controls" open>
             <summary>Inference parameters <span>CALIBRATE</span></summary>
@@ -83,6 +87,29 @@
         <aside id="inspector" class="inspector" aria-label="Object inspector"></aside>
       </main>
 
+      <dialog id="relationGraphDialog" class="relation-graph-dialog" aria-labelledby="relationGraphTitle">
+        <div class="graph-header">
+          <div>
+            <div class="eyebrow">SRpy · relation topology</div>
+            <h2 id="relationGraphTitle">Object relation graph</h2>
+            <p>Nodes use the flat's measured positions. Edges denote predicates, not routes or unobstructed sightlines.</p>
+          </div>
+          <button id="closeRelationGraphButton" class="graph-close" type="button" aria-label="Close relation graph">×</button>
+        </div>
+        <div class="graph-controls">
+          <div class="graph-tabs" role="tablist" aria-label="Relation graph scope">
+            <button id="graphPipelineTab" type="button" role="tab" aria-selected="true">Pipeline proofs</button>
+            <button id="graphSelectedTab" type="button" role="tab" aria-selected="false">Selected object</button>
+          </div>
+          <label class="graph-filter" for="graphPredicateFilter">Predicate <select id="graphPredicateFilter"><option value="all">All predicates</option></select></label>
+          <span id="graphSummary" class="graph-summary" role="status"></span>
+        </div>
+        <div class="graph-layout">
+          <div class="graph-canvas"><svg id="relationGraphSvg" viewBox="0 0 1000 600" role="img" aria-label="Spatial object relation graph"></svg></div>
+          <aside id="relationGraphList" class="graph-list" aria-label="Relation graph edge list"></aside>
+        </div>
+      </dialog>
+
       <section class="query-dock" aria-label="Spatial query composer">
         <div class="dock-heading">
           <div>
@@ -99,6 +126,31 @@
           </label>
           <button id="runButton" class="run-button" type="button"><span class="run-icon">▶</span> Run reasoning</button>
         </div>
+        <details id="pipelineEditor" class="pipeline-editor">
+          <summary>Pipeline editor <span>Build, reorder and save stages</span></summary>
+          <div class="pipeline-editor-body">
+            <p class="editor-note">Stages are executed left to right by the server. Editing a stage updates the formal pipeline above; run it to validate the result.</p>
+            <div id="stageList" class="stage-list" aria-live="polite"></div>
+            <div class="editor-actions">
+              <label>Add stage
+                <select id="addStageType" aria-label="New stage operation">
+                  <option value="deduce">deduce</option><option value="filter">filter</option>
+                  <option value="pick">pick</option><option value="select">select</option>
+                  <option value="sort">sort</option><option value="slice">slice</option>
+                  <option value="calc">calc</option><option value="map">map</option>
+                </select>
+              </label>
+              <button id="addStageButton" type="button">Add stage</button>
+              <span id="editorStatus" role="status"></span>
+            </div>
+            <div class="save-pipeline">
+              <label for="pipelineName">Name this pipeline</label>
+              <input id="pipelineName" type="text" maxlength="60" placeholder="e.g. Movable objects near the observer" />
+              <button id="savePipelineButton" type="button">Validate &amp; save</button>
+              <span>Saved in this browser only.</span>
+            </div>
+          </div>
+        </details>
         <details id="tracePanel" class="trace-panel">
           <summary><span>Reasoning trace</span><span id="traceSummary">No execution yet</span></summary>
           <div id="traceBody" class="trace-body"></div>
@@ -125,7 +177,7 @@
       </div>
       <div class="scope-note">
         <strong>Method boundary</strong>
-        Oriented-bounding-box inference with configurable spatial fuzziness; no physics, occlusion solver, or motion-planning safety claim.
+        Oriented-bounding-box inference with configurable spatial fuzziness; no physics, occlusion solver, or motion-planning safety claim. Tabletop overlaps are user-managed; the observer is constrained by walls and floor furniture.
       </div>
       <button id="startButton" class="run-button" type="button">Enter the workbench <span>→</span></button>
     </dialog>
